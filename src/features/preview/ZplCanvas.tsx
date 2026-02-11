@@ -262,6 +262,43 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+function snapToPixel(value: number): number {
+  return Math.round(value);
+}
+
+function invertRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number
+) {
+  const left = Math.max(0, snapToPixel(x));
+  const top = Math.max(0, snapToPixel(y));
+  const w = Math.max(0, snapToPixel(width));
+  const h = Math.max(0, snapToPixel(height));
+  if (!w || !h) {
+    return;
+  }
+
+  const maxW = Math.max(0, ctx.canvas.width - left);
+  const maxH = Math.max(0, ctx.canvas.height - top);
+  const safeW = Math.min(w, maxW);
+  const safeH = Math.min(h, maxH);
+  if (!safeW || !safeH) {
+    return;
+  }
+
+  const image = ctx.getImageData(left, top, safeW, safeH);
+  const data = image.data;
+  for (let i = 0; i < data.length; i += 4) {
+    data[i] = 255 - data[i];
+    data[i + 1] = 255 - data[i + 1];
+    data[i + 2] = 255 - data[i + 2];
+  }
+  ctx.putImageData(image, left, top);
+}
+
 function parseDataMatrixEscapes(
   value: string,
   escapeChar: string,
@@ -995,20 +1032,28 @@ function drawGraphicBox(
   scale: number,
   reverse: boolean
 ) {
-  const pxThickness = Math.max(1, thickness * scale);
-  const pxWidth = width * scale;
-  const pxHeight = height * scale;
-  ctx.fillStyle = reverse ? "#ffffff" : "#111827";
-
-  if (pxHeight <= pxThickness || pxWidth <= pxThickness) {
-    ctx.fillRect(x, y, pxWidth, pxHeight);
+  const pxThickness = Math.max(1, snapToPixel(thickness * scale));
+  const pxWidth = Math.max(1, snapToPixel(width * scale));
+  const pxHeight = Math.max(1, snapToPixel(height * scale));
+  const pxX = snapToPixel(x);
+  const pxY = snapToPixel(y);
+  if (reverse) {
+    // Zebra-like ^FR behavior for ^GB: invert pixels inside the field box.
+    invertRect(ctx, pxX, pxY, pxWidth, pxHeight);
     return;
   }
 
-  ctx.fillRect(x, y, pxWidth, pxThickness);
-  ctx.fillRect(x, y + pxHeight - pxThickness, pxWidth, pxThickness);
-  ctx.fillRect(x, y, pxThickness, pxHeight);
-  ctx.fillRect(x + pxWidth - pxThickness, y, pxThickness, pxHeight);
+  ctx.fillStyle = "#111827";
+
+  if (pxHeight <= pxThickness || pxWidth <= pxThickness) {
+    ctx.fillRect(pxX, pxY, pxWidth, pxHeight);
+    return;
+  }
+
+  ctx.fillRect(pxX, pxY, pxWidth, pxThickness);
+  ctx.fillRect(pxX, pxY + pxHeight - pxThickness, pxWidth, pxThickness);
+  ctx.fillRect(pxX, pxY, pxThickness, pxHeight);
+  ctx.fillRect(pxX + pxWidth - pxThickness, pxY, pxThickness, pxHeight);
 }
 
 function drawZplPreview(canvas: HTMLCanvasElement, zpl: string): DrawResult {
@@ -1025,10 +1070,10 @@ function drawZplPreview(canvas: HTMLCanvasElement, zpl: string): DrawResult {
   const scaleX = (width - PADDING * 2) / LABEL_WIDTH;
   const scaleY = (height - PADDING * 2) / LABEL_HEIGHT;
   const scale = Math.min(scaleX, scaleY);
-  const renderLabelWidth = LABEL_WIDTH * scale;
-  const renderLabelHeight = LABEL_HEIGHT * scale;
-  const originX = (width - renderLabelWidth) / 2;
-  const originY = (height - renderLabelHeight) / 2;
+  const renderLabelWidth = snapToPixel(LABEL_WIDTH * scale);
+  const renderLabelHeight = snapToPixel(LABEL_HEIGHT * scale);
+  const originX = snapToPixel((width - renderLabelWidth) / 2);
+  const originY = snapToPixel((height - renderLabelHeight) / 2);
 
   ctx.clearRect(0, 0, width, height);
   ctx.fillStyle = "#e6effb";
