@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { detectAndDecode } from "./core/encoding/detectAndDecode";
 import type { LabelCandidate } from "./core/types";
 import { extractLabels } from "./core/zpl/extractLabels";
+import { LabelBuilderPage } from "./features/builder/LabelBuilderPage";
 import { EditorPanel } from "./features/editor/EditorPanel";
 import { ZipUpload } from "./features/import/ZipUpload";
 import { PreviewPanel } from "./features/preview/PreviewPanel";
@@ -18,6 +19,8 @@ const SAMPLE_ZPL = `^XA
 ^XZ`;
 
 export default function App() {
+  const [viewMode, setViewMode] = useState<"main" | "builder">("main");
+  const [builderSeedZpl, setBuilderSeedZpl] = useState<string>(SAMPLE_ZPL);
   const [persistCurrentZpl, setPersistCurrentZpl] = useState<boolean>(() => {
     try {
       return window.localStorage.getItem(LS_PERSIST_KEY) === "1";
@@ -98,11 +101,32 @@ export default function App() {
     }
   };
 
+  const openBuilder = (zpl?: string) => {
+    setBuilderSeedZpl(zpl || rawInput || SAMPLE_ZPL);
+    setViewMode("builder");
+  };
+
+  const closeBuilder = (nextZpl?: string) => {
+    if (typeof nextZpl === "string") {
+      setRawInput(nextZpl);
+    }
+    setViewMode("main");
+  };
+
+  if (viewMode === "builder") {
+    return <LabelBuilderPage seedZpl={builderSeedZpl} onBack={closeBuilder} />;
+  }
+
   return (
     <main className="app-shell">
       <header className="app-header">
         <h1>ZPLRemix</h1>
         <p>Paste ZPL or encoded payload and preview the label instantly.</p>
+        <div className="builder-entry">
+          <button type="button" className="download-btn" onClick={() => openBuilder()}>
+            Open Builder
+          </button>
+        </div>
       </header>
 
       <section className="app-grid">
@@ -115,6 +139,7 @@ export default function App() {
           labels={availableLabels}
           selectedLabelId={selectedLabelId}
           onSelectLabel={onSelectLabel}
+          onOpenBuilder={openBuilder}
           persistCurrentZpl={persistCurrentZpl}
           onPersistCurrentZplChange={setPersistCurrentZpl}
         />

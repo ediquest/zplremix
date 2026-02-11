@@ -11,6 +11,7 @@ type PreviewPanelProps = {
   labels: LabelCandidate[];
   selectedLabelId: string | null;
   onSelectLabel: (id: string) => void;
+  onOpenBuilder: (zpl?: string) => void;
   persistCurrentZpl: boolean;
   onPersistCurrentZplChange: (enabled: boolean) => void;
 };
@@ -111,6 +112,7 @@ export function PreviewPanel({
   labels,
   selectedLabelId,
   onSelectLabel,
+  onOpenBuilder,
   persistCurrentZpl,
   onPersistCurrentZplChange
 }: PreviewPanelProps) {
@@ -604,6 +606,9 @@ export function PreviewPanel({
             </button>
             <button type="button" className="rotate-btn" onClick={rotatePreviewRight}>
               Rotate Right
+            </button>
+            <button type="button" className="rotate-btn" onClick={() => onOpenBuilder(selectedLabel.zpl)}>
+              Open In Builder
             </button>
           </div>
           <div className="download-actions">
