@@ -11,6 +11,11 @@ type ZplCanvasProps = {
   printerSettings?: PrinterSettings;
   showNonPrintableZones?: boolean;
   respectZplGeometry?: boolean;
+  printEngineOverride?: {
+    enabled: boolean;
+    darkness: number;
+    speedIps: number;
+  };
 };
 
 type Orientation = "N" | "R" | "I" | "B";
@@ -177,6 +182,11 @@ type Rect = {
   y: number;
   width: number;
   height: number;
+};
+
+type PrintEngineState = {
+  darkness: number;
+  speedIps: number;
 };
 
 const LABEL_WIDTH = 812;
@@ -994,6 +1004,63 @@ function rectIntersects(a: Rect, b: Rect): boolean {
     && a.y < b.y + b.height
     && a.y + a.height > b.y
   );
+}
+
+function applyPrintEngineSimulation(
+  ctx: CanvasRenderingContext2D,
+  labelRect: Rect,
+  engine: PrintEngineState
+) {
+  const x = Math.max(0, Math.floor(labelRect.x));
+  const y = Math.max(0, Math.floor(labelRect.y));
+  const width = Math.max(1, Math.floor(labelRect.width));
+  const height = Math.max(1, Math.floor(labelRect.height));
+  if (width <= 1 || height <= 1) {
+    return;
+  }
+
+  const speedPenalty = clamp((engine.speedIps - 4) / 10, 0, 1);
+  const darknessGain = clamp(1 + (engine.darkness / 30) * 0.5 - speedPenalty * 0.12, 0.55, 1.7);
+  const verticalSpread = speedPenalty * 0.32;
+  const needsPass = Math.abs(engine.darkness) > 0.001 || speedPenalty > 0.001;
+  if (!needsPass) {
+    return;
+  }
+
+  const imageData = ctx.getImageData(x, y, width, height);
+  const data = imageData.data;
+  const rowStride = width * 4;
+
+  for (let row = 0; row < height; row += 1) {
+    for (let col = 0; col < width; col += 1) {
+      const offset = row * rowStride + col * 4;
+      const alpha = data[offset + 3];
+      if (alpha === 0) {
+        continue;
+      }
+      const lum =
+        (data[offset] * 0.299 + data[offset + 1] * 0.587 + data[offset + 2] * 0.114) / 255;
+      // Keep almost-white paper untouched.
+      if (lum >= 0.985) {
+        continue;
+      }
+
+      let adjustedLum = clamp(lum / darknessGain, 0, 1);
+      if (verticalSpread > 0 && row + 1 < height) {
+        const nextOffset = offset + rowStride;
+        const nextLum =
+          (data[nextOffset] * 0.299 + data[nextOffset + 1] * 0.587 + data[nextOffset + 2] * 0.114)
+          / 255;
+        adjustedLum = adjustedLum * (1 - verticalSpread) + Math.min(adjustedLum, nextLum) * verticalSpread;
+      }
+      const gray = Math.round(adjustedLum * 255);
+      data[offset] = gray;
+      data[offset + 1] = gray;
+      data[offset + 2] = gray;
+    }
+  }
+
+  ctx.putImageData(imageData, x, y);
 }
 
 function normalizeZplText(value: string): string {
@@ -2096,7 +2163,12 @@ function drawZplPreview(
   printerSettings: PrinterSettings = DEFAULT_PRINTER_SETTINGS,
   showNonPrintableZones = true,
   respectZplGeometry = true,
-  renderOptions: DrawRenderOptions = { withChrome: true, fitToCanvas: true, textScale: 1 }
+  renderOptions: DrawRenderOptions = { withChrome: true, fitToCanvas: true, textScale: 1 },
+  printEngineOverride?: {
+    enabled: boolean;
+    darkness: number;
+    speedIps: number;
+  }
 ): DrawResult {
   const ctx = canvas.getContext("2d");
   if (!ctx) {
@@ -2191,6 +2263,7 @@ function drawZplPreview(
   let labelShift = 0;
   let printWidth = geometry.printWidth;
   let labelLength = geometry.labelLength;
+  let printEngine: PrintEngineState = { darkness: 0, speedIps: 4 };
   let fieldReverse = false;
   let latestCode128Debug: Code128DebugInfo | null = null;
   let encoding: EncodingMode = "cp1252";
@@ -2470,6 +2543,22 @@ function drawZplPreview(
 
     if (command === "PO") {
       printOrientation = parsePrintOrientation(parts[0], printOrientation, addWarning);
+      return;
+    }
+
+    if (command === "MD") {
+      printEngine = {
+        ...printEngine,
+        darkness: clamp(parseInteger(parts[0], printEngine.darkness), -30, 30)
+      };
+      return;
+    }
+
+    if (command === "PR") {
+      printEngine = {
+        ...printEngine,
+        speedIps: clamp(parseNumber(parts[0], printEngine.speedIps), 1, 14)
+      };
       return;
     }
 
@@ -3021,6 +3110,27 @@ function drawZplPreview(
   });
 
   ctx.restore();
+  const effectiveEngine =
+    printEngineOverride?.enabled
+      ? {
+          darkness: clamp(printEngineOverride.darkness, -30, 30),
+          speedIps: clamp(printEngineOverride.speedIps, 1, 14)
+        }
+      : printEngine;
+  applyPrintEngineSimulation(ctx, labelRect, effectiveEngine);
+  if (Math.abs(effectiveEngine.darkness) > 0.001 || Math.abs(effectiveEngine.speedIps - 4) > 0.001) {
+    const source = printEngineOverride?.enabled ? "override" : "zpl";
+    addDiagnostic(
+      `Print engine simulation applied (${source}: ^MD=${effectiveEngine.darkness}, ^PR=${effectiveEngine.speedIps.toFixed(1)} ips).`,
+      {
+        line: 1,
+        command: "ENGINE",
+        severity: "info",
+        impact: "low",
+        kind: "fallback_used"
+      }
+    );
+  }
 
   return {
     code128Debug: latestCode128Debug,
@@ -3032,7 +3142,12 @@ function drawZplPreview(
 export function renderLabelForExport(
   zpl: string,
   printerSettings: PrinterSettings = DEFAULT_PRINTER_SETTINGS,
-  respectZplGeometry = true
+  respectZplGeometry = true,
+  printEngineOverride?: {
+    enabled: boolean;
+    darkness: number;
+    speedIps: number;
+  }
 ): HTMLCanvasElement {
   const tokens = tokenizeZplCommands(zpl);
   const geometry = resolveLabelGeometryWithProfile(tokens, printerSettings, respectZplGeometry);
@@ -3045,7 +3160,8 @@ export function renderLabelForExport(
     printerSettings,
     false,
     respectZplGeometry,
-    { withChrome: false, fitToCanvas: false, textScale: 1 }
+    { withChrome: false, fitToCanvas: false, textScale: 1 },
+    printEngineOverride
   );
   return canvas;
 }
@@ -3058,7 +3174,8 @@ export function ZplCanvas({
   onCanvasReady,
   printerSettings = DEFAULT_PRINTER_SETTINGS,
   showNonPrintableZones = true,
-  respectZplGeometry = true
+  respectZplGeometry = true,
+  printEngineOverride
 }: ZplCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -3077,7 +3194,8 @@ export function ZplCanvas({
       printerSettings,
       showNonPrintableZones,
       respectZplGeometry,
-      { withChrome: false, fitToCanvas: false, textScale: 1 }
+      { withChrome: false, fitToCanvas: false, textScale: 1 },
+      printEngineOverride
     );
     if (onCode128DebugChange) {
       onCode128DebugChange(result.code128Debug);
@@ -3096,6 +3214,7 @@ export function ZplCanvas({
     printerSettings,
     respectZplGeometry,
     showNonPrintableZones,
+    printEngineOverride,
     zpl
   ]);
 

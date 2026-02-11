@@ -19,6 +19,9 @@ type PersistedPreviewSettings = {
   showNonPrintableZones: boolean;
   respectZplGeometry: boolean;
   printerSettings: PrinterSettings;
+  printEngineOverrideEnabled: boolean;
+  printEngineDarkness: number;
+  printEngineSpeedIps: number;
 };
 
 const DEFAULT_PRINTER_SETTINGS: PrinterSettings = {
@@ -52,7 +55,10 @@ function loadPersistedSettings(): PersistedPreviewSettings {
       return {
         showNonPrintableZones: true,
         respectZplGeometry: true,
-        printerSettings: DEFAULT_PRINTER_SETTINGS
+        printerSettings: DEFAULT_PRINTER_SETTINGS,
+        printEngineOverrideEnabled: false,
+        printEngineDarkness: 0,
+        printEngineSpeedIps: 4
       };
     }
     const parsed = JSON.parse(raw) as Partial<PersistedPreviewSettings>;
@@ -69,6 +75,13 @@ function loadPersistedSettings(): PersistedPreviewSettings {
     return {
       showNonPrintableZones: parsed.showNonPrintableZones ?? true,
       respectZplGeometry: parsed.respectZplGeometry ?? true,
+      printEngineOverrideEnabled: parsed.printEngineOverrideEnabled ?? false,
+      printEngineDarkness: Number.isFinite(parsed.printEngineDarkness)
+        ? Math.max(-30, Math.min(30, Number(parsed.printEngineDarkness)))
+        : 0,
+      printEngineSpeedIps: Number.isFinite(parsed.printEngineSpeedIps)
+        ? Math.max(1, Math.min(14, Number(parsed.printEngineSpeedIps)))
+        : 4,
       printerSettings: {
         model: typeof source.model === "string" ? source.model : DEFAULT_PRINTER_SETTINGS.model,
         densityDpmm: density,
@@ -85,7 +98,10 @@ function loadPersistedSettings(): PersistedPreviewSettings {
     return {
       showNonPrintableZones: true,
       respectZplGeometry: true,
-      printerSettings: DEFAULT_PRINTER_SETTINGS
+      printerSettings: DEFAULT_PRINTER_SETTINGS,
+      printEngineOverrideEnabled: false,
+      printEngineDarkness: 0,
+      printEngineSpeedIps: 4
     };
   }
 }
@@ -103,6 +119,9 @@ export function PreviewPanel({
   const [diagnostics, setDiagnostics] = useState<ZplDiagnostic[]>([]);
   const [showNonPrintableZones, setShowNonPrintableZones] = useState(persisted.showNonPrintableZones);
   const [respectZplGeometry, setRespectZplGeometry] = useState(persisted.respectZplGeometry);
+  const [printEngineOverrideEnabled, setPrintEngineOverrideEnabled] = useState(persisted.printEngineOverrideEnabled);
+  const [printEngineDarkness, setPrintEngineDarkness] = useState(persisted.printEngineDarkness);
+  const [printEngineSpeedIps, setPrintEngineSpeedIps] = useState(persisted.printEngineSpeedIps);
   const [printerSettings, setPrinterSettings] = useState<PrinterSettings>(persisted.printerSettings);
   const [canvasRotationDeg, setCanvasRotationDeg] = useState(0);
   const [baseCanvasSize, setBaseCanvasSize] = useState({ width: 0, height: 0 });
@@ -123,13 +142,23 @@ export function PreviewPanel({
       const payload: PersistedPreviewSettings = {
         showNonPrintableZones,
         respectZplGeometry,
+        printEngineOverrideEnabled,
+        printEngineDarkness,
+        printEngineSpeedIps,
         printerSettings
       };
       window.localStorage.setItem(LS_PREVIEW_SETTINGS_KEY, JSON.stringify(payload));
     } catch {
       // Ignore localStorage errors in restricted environments.
     }
-  }, [printerSettings, respectZplGeometry, showNonPrintableZones]);
+  }, [
+    printerSettings,
+    respectZplGeometry,
+    showNonPrintableZones,
+    printEngineOverrideEnabled,
+    printEngineDarkness,
+    printEngineSpeedIps
+  ]);
 
   const onDensityChange = (density: PrintDensityDpmm) => {
     const dpi = density === 24 ? 600 : density === 12 ? 300 : 203;
@@ -176,6 +205,11 @@ export function PreviewPanel({
 
   const fileSafeName = (selectedLabel?.source ?? "label").replace(/[^a-z0-9_-]/gi, "_");
   const baseName = `${fileSafeName}_${selectedLabel?.index ?? 1}`;
+  const printEngineOverride = {
+    enabled: printEngineOverrideEnabled,
+    darkness: printEngineDarkness,
+    speedIps: printEngineSpeedIps
+  };
 
   const saveBlob = (blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob);
@@ -200,7 +234,12 @@ export function PreviewPanel({
 
   const downloadPng = () => {
     if (!selectedLabel) return;
-    const exportCanvas = renderLabelForExport(selectedLabel.zpl, printerSettings, respectZplGeometry);
+    const exportCanvas = renderLabelForExport(
+      selectedLabel.zpl,
+      printerSettings,
+      respectZplGeometry,
+      printEngineOverride
+    );
     exportCanvas.toBlob((blob) => {
       if (!blob) return;
       saveBlob(blob, `${baseName}.png`);
@@ -209,7 +248,12 @@ export function PreviewPanel({
 
   const downloadPdf = () => {
     if (!selectedLabel) return;
-    const exportCanvas = renderLabelForExport(selectedLabel.zpl, printerSettings, respectZplGeometry);
+    const exportCanvas = renderLabelForExport(
+      selectedLabel.zpl,
+      printerSettings,
+      respectZplGeometry,
+      printEngineOverride
+    );
     const imageData = exportCanvas.toDataURL("image/png");
     const pdf = new jsPDF({
       orientation: exportCanvas.width >= exportCanvas.height ? "landscape" : "portrait",
@@ -457,6 +501,66 @@ export function PreviewPanel({
         </div>
 
         <div className="printer-row printer-row-toggle">
+          <label htmlFor="engine-override">Override ^MD/^PR for preview</label>
+          <div className="printer-controls">
+            <input
+              id="engine-override"
+              type="checkbox"
+              checked={printEngineOverrideEnabled}
+              onChange={(e) => setPrintEngineOverrideEnabled(e.target.checked)}
+            />
+          </div>
+        </div>
+
+        <div className="printer-row printer-row-size">
+          <label>Print Engine:</label>
+          <div className="printer-controls size-controls">
+            <div className="size-line">
+              <span>MD</span>
+              <input
+                type="range"
+                min={-30}
+                max={30}
+                step={1}
+                value={printEngineDarkness}
+                onChange={(e) => setPrintEngineDarkness(Number(e.target.value))}
+                disabled={!printEngineOverrideEnabled}
+              />
+              <input
+                type="number"
+                min={-30}
+                max={30}
+                step={1}
+                value={printEngineDarkness}
+                onChange={(e) => setPrintEngineDarkness(Number(e.target.value))}
+                disabled={!printEngineOverrideEnabled}
+              />
+            </div>
+            <div className="size-line">
+              <span>PR</span>
+              <input
+                type="range"
+                min={1}
+                max={14}
+                step={0.5}
+                value={printEngineSpeedIps}
+                onChange={(e) => setPrintEngineSpeedIps(Number(e.target.value))}
+                disabled={!printEngineOverrideEnabled}
+              />
+              <input
+                type="number"
+                min={1}
+                max={14}
+                step={0.5}
+                value={printEngineSpeedIps}
+                onChange={(e) => setPrintEngineSpeedIps(Number(e.target.value))}
+                disabled={!printEngineOverrideEnabled}
+              />
+            </div>
+          </div>
+        </div>
+
+        <div className="printer-row printer-row-toggle">
           <label htmlFor="persist-current-zpl">Remember Current ZPL (localStorage)</label>
           <div className="printer-controls">
             <input
@@ -481,6 +585,7 @@ export function PreviewPanel({
                 printerSettings={printerSettings}
                 showNonPrintableZones={showNonPrintableZones}
                 respectZplGeometry={respectZplGeometry}
+                printEngineOverride={printEngineOverride}
               />
             </div>
           </div>
