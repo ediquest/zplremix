@@ -1,21 +1,29 @@
 import { useEffect, useRef } from "react";
 import bwipjs from "bwip-js";
+import type { PrinterSettings } from "../../core/types";
 
 type ZplCanvasProps = {
   zpl: string;
   onCode128DebugChange?: (debug: Code128DebugInfo | null) => void;
   onWarningsChange?: (warnings: string[]) => void;
+  onDiagnosticsChange?: (diagnostics: ZplDiagnostic[]) => void;
+  onCanvasReady?: (canvas: HTMLCanvasElement | null) => void;
+  printerSettings?: PrinterSettings;
+  showNonPrintableZones?: boolean;
+  respectZplGeometry?: boolean;
 };
 
 type Orientation = "N" | "R" | "I" | "B";
 type PositionMode = "FO" | "FT";
-type BarcodeKind = "none" | "code128" | "code39" | "qr" | "datamatrix";
+type BarcodeKind = "none" | "code128" | "code39" | "qr" | "datamatrix" | "pdf417" | "maxicode";
 
 type FontState = {
   width: number;
   height: number;
   bold: boolean;
   orientation: Orientation;
+  family: string;
+  sourceName: string;
 };
 
 type BarcodeState = {
@@ -28,16 +36,24 @@ type BarcodeState = {
   showTextAbove: boolean;
   withCheckDigit: boolean;
   code128Mode: "N" | "U" | "A";
+  qrModel: 1 | 2;
+  qrErrorCorrection: "L" | "M" | "Q" | "H";
   qrMagnification: number;
   dataMatrixQuality: number;
   dataMatrixColumns: number;
   dataMatrixRows: number;
   dataMatrixFormat: "square" | "rectangle";
   dataMatrixEscapeChar: string;
+  pdf417SecurityLevel: number;
+  pdf417Columns: number;
+  pdf417Rows: number;
+  pdf417Truncate: boolean;
+  maxicodeMode: number;
 };
 
 type TextLayout = {
   lines: string[];
+  offsets: number[];
   fontPx: number;
   lineHeight: number;
   width: number;
@@ -45,6 +61,7 @@ type TextLayout = {
   baseline: number;
   stretch: number;
   fontWeight: "500" | "700";
+  family: string;
 };
 
 type BarcodeLayout = {
@@ -58,6 +75,47 @@ type BarcodeLayout = {
   moduleWidth: number;
   barHeight: number;
   printedText: string;
+};
+
+type ZplToken = {
+  prefix: "^" | "~";
+  command: string;
+  args: string;
+  offset: number;
+  line: number;
+};
+
+type GraphicField = {
+  bytesPerRow: number;
+  rowCount: number;
+  bytes: Uint8Array;
+};
+
+type PrintOrientation = "N" | "I";
+type FieldBlockAlign = "L" | "C" | "R" | "J";
+
+type FieldBlockState = {
+  width: number;
+  maxLines: number;
+  lineSpacing: number;
+  align: FieldBlockAlign;
+  hangingIndent: number;
+};
+
+type FieldTemplate = {
+  x: number;
+  y: number;
+  positionMode: PositionMode;
+  font: FontState;
+  barcode: BarcodeState;
+  reverse: boolean;
+  fieldBlock: FieldBlockState | null;
+};
+
+type SerialState = {
+  current: string;
+  increment: number;
+  pad: number;
 };
 
 type Code128Token = { type: "char"; value: string } | { type: "fnc1" };
@@ -77,14 +135,60 @@ export type Code128DebugInfo = {
   autoFnc1Count: number;
 };
 
+export type ZplDiagnosticSeverity = "info" | "warning" | "error";
+export type ZplDiagnosticImpact = "low" | "medium" | "high";
+export type ZplDiagnosticKind =
+  | "unsupported_command"
+  | "invalid_args"
+  | "fallback_used"
+  | "data_warning";
+
+export type ZplDiagnostic = {
+  line: number;
+  command: string;
+  severity: ZplDiagnosticSeverity;
+  impact: ZplDiagnosticImpact;
+  kind: ZplDiagnosticKind;
+  message: string;
+};
+
 type DrawResult = {
   code128Debug: Code128DebugInfo | null;
   warnings: string[];
+  diagnostics: ZplDiagnostic[];
+};
+
+type DrawRenderOptions = {
+  withChrome: boolean;
+  fitToCanvas: boolean;
+  textScale: number;
+};
+
+type Rect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 };
 
 const LABEL_WIDTH = 812;
 const LABEL_HEIGHT = 1218;
 const PADDING = 24;
+const QR_DRAW_ADJUST = 0.50;
+const QR_X_SHIFT_DOTS = 18;
+const QR_Y_SHIFT_DOTS = 72;
+
+const DEFAULT_PRINTER_SETTINGS: PrinterSettings = {
+  model: "Zebra GK420d",
+  densityDpmm: 8,
+  dpi: 203,
+  quality: "grayscale",
+  labelWidth: 4,
+  labelHeight: 6,
+  labelUnit: "in",
+  showLabelIndex: 1,
+  showLabelCount: 1
+};
 
 const CODE39_PATTERNS: Record<string, string> = {
   "0": "nnnwwnwnn",
@@ -262,6 +366,165 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+function splitLeadingArgs(value: string, count: number): string[] {
+  if (count <= 1) {
+    return [value];
+  }
+  const parts: string[] = [];
+  let start = 0;
+  for (let i = 0; i < value.length && parts.length < count - 1; i += 1) {
+    if (value[i] === ",") {
+      parts.push(value.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(value.slice(start));
+  while (parts.length < count) {
+    parts.push("");
+  }
+  return parts;
+}
+
+function tokenizeZplCommands(zpl: string): ZplToken[] {
+  const tokens: ZplToken[] = [];
+  let line = 1;
+  for (let i = 0; i < zpl.length; i += 1) {
+    const prefix = zpl[i];
+    if (prefix === "\n") {
+      line += 1;
+      continue;
+    }
+    if (prefix !== "^" && prefix !== "~") {
+      continue;
+    }
+    const command = zpl.slice(i + 1, i + 3);
+    if (command.length < 2) {
+      continue;
+    }
+    const startLine = line;
+    let end = i + 3;
+    while (end < zpl.length && zpl[end] !== "^" && zpl[end] !== "~") {
+      if (zpl[end] === "\n") {
+        line += 1;
+      }
+      end += 1;
+    }
+    tokens.push({
+      prefix,
+      command: command.toUpperCase(),
+      args: zpl.slice(i + 3, end),
+      offset: i,
+      line: startLine
+    });
+    i = end - 1;
+  }
+  return tokens;
+}
+
+function normalizeGraphicName(rawName: string): string {
+  let normalized = rawName.trim().toUpperCase();
+  if (!normalized) {
+    return "";
+  }
+  if (!normalized.includes(":")) {
+    normalized = `R:${normalized}`;
+  }
+  if (!normalized.includes(".")) {
+    normalized = `${normalized}.GRF`;
+  }
+  return normalized;
+}
+
+function parseAsciiHexGraphic(
+  hexData: string,
+  bytesPerRow: number,
+  rowCount: number,
+  context: string,
+  addWarning: (message: string) => void
+): Uint8Array | null {
+  const cleaned = hexData.replace(/\s+/g, "");
+  if (!cleaned) {
+    addWarning(`${context}: graphic data is empty.`);
+    return null;
+  }
+  if (/[^0-9A-Fa-f]/.test(cleaned)) {
+    addWarning(`${context}: compressed/non-hex graphic data is not supported yet.`);
+    return null;
+  }
+
+  const expectedBytes = bytesPerRow * rowCount;
+  if (expectedBytes <= 0) {
+    addWarning(`${context}: invalid graphic dimensions.`);
+    return null;
+  }
+
+  const usableHexLength = cleaned.length - (cleaned.length % 2);
+  if (usableHexLength !== cleaned.length) {
+    addWarning(`${context}: odd-length hex payload; the last nibble was ignored.`);
+  }
+  const decodedBytes = Math.floor(usableHexLength / 2);
+  const bytes = new Uint8Array(expectedBytes);
+  const copyBytes = Math.min(expectedBytes, decodedBytes);
+
+  for (let i = 0; i < copyBytes; i += 1) {
+    bytes[i] = Number.parseInt(cleaned.slice(i * 2, i * 2 + 2), 16);
+  }
+
+  if (decodedBytes < expectedBytes) {
+    addWarning(`${context}: graphic payload is shorter than declared size; missing bytes were padded.`);
+  } else if (decodedBytes > expectedBytes) {
+    addWarning(`${context}: graphic payload is longer than declared size; extra bytes were ignored.`);
+  }
+
+  return bytes;
+}
+
+function parseGraphicField(
+  formatRaw: string,
+  totalBytesRaw: string,
+  bytesUsedRaw: string,
+  bytesPerRowRaw: string,
+  dataRaw: string,
+  context: string,
+  addWarning: (message: string) => void
+): GraphicField | null {
+  const format = (formatRaw || "A").trim().toUpperCase();
+  if (format !== "A") {
+    addWarning(`${context}: format "${format}" is not supported yet (supported: A).`);
+    return null;
+  }
+
+  const bytesPerRow = Math.max(0, parseInteger(bytesPerRowRaw, 0));
+  const declaredTotalBytes = Math.max(0, parseInteger(totalBytesRaw, 0));
+  const declaredBytesUsed = Math.max(0, parseInteger(bytesUsedRaw, 0));
+  if (bytesPerRow <= 0) {
+    addWarning(`${context}: bytes-per-row must be greater than 0.`);
+    return null;
+  }
+
+  let rowCount = 0;
+  if (declaredBytesUsed > 0) {
+    rowCount = Math.max(1, Math.ceil(declaredBytesUsed / bytesPerRow));
+  } else if (declaredTotalBytes > 0) {
+    rowCount = Math.max(1, Math.ceil(declaredTotalBytes / bytesPerRow));
+  }
+  if (rowCount <= 0) {
+    addWarning(`${context}: row count cannot be resolved.`);
+    return null;
+  }
+
+  const bytes = parseAsciiHexGraphic(dataRaw, bytesPerRow, rowCount, context, addWarning);
+  if (!bytes) {
+    return null;
+  }
+
+  return {
+    bytesPerRow,
+    rowCount,
+    bytes
+  };
+}
+
 function snapToPixel(value: number): number {
   return Math.round(value);
 }
@@ -386,6 +649,142 @@ function parseOrientation(value: string | undefined, fallback: Orientation): Ori
   return isOrientation(next) ? next : fallback;
 }
 
+function parsePrintOrientation(
+  value: string | undefined,
+  fallback: PrintOrientation,
+  addWarning?: (message: string) => void
+): PrintOrientation {
+  const normalized = (value ?? "").trim().toUpperCase();
+  if (!normalized) {
+    return fallback;
+  }
+  if (normalized === "N" || normalized === "I") {
+    return normalized;
+  }
+  if (addWarning) {
+    addWarning(`Unsupported ^PO value "${value}". Supported values are N and I.`);
+  }
+  return fallback;
+}
+
+function parseFieldBlockAlign(value: string | undefined): FieldBlockAlign {
+  const normalized = (value ?? "L").trim().toUpperCase();
+  if (normalized === "C" || normalized === "R" || normalized === "J") {
+    return normalized;
+  }
+  return "L";
+}
+
+function parseFieldNumber(value: string | undefined): number | null {
+  if (!value) {
+    return null;
+  }
+  const parsed = Number.parseInt(value.trim(), 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return null;
+  }
+  return parsed;
+}
+
+function impactForCommand(command: string): ZplDiagnosticImpact {
+  if (
+    command === "PW"
+    || command === "LL"
+    || command === "LH"
+    || command === "LT"
+    || command === "LS"
+    || command === "PO"
+    || command === "GF"
+    || command === "DG"
+    || command === "XG"
+  ) {
+    return "high";
+  }
+  if (
+    command === "B7"
+    || command === "BD"
+    || command === "BC"
+    || command === "BX"
+    || command === "BQ"
+    || command === "FB"
+    || command === "A@"
+  ) {
+    return "medium";
+  }
+  return "low";
+}
+
+function densityDpmmToDpi(density: number): number {
+  if (density === 24) {
+    return 600;
+  }
+  if (density === 12) {
+    return 300;
+  }
+  return 203;
+}
+
+function nonPrintableMarginsDots(printerSettings: PrinterSettings): {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+} {
+  const model = printerSettings.model.toUpperCase();
+  const dpi = printerSettings.dpi;
+  const base = Math.max(1, Math.round((dpi / 203) * 8));
+  if (model.includes("GK")) {
+    return { left: base + 2, right: base + 2, top: base, bottom: base };
+  }
+  if (model.includes("ZD")) {
+    return { left: base + 1, right: base + 1, top: base, bottom: base };
+  }
+  if (model.includes("ZT")) {
+    return { left: base, right: base, top: base, bottom: base };
+  }
+  return { left: base, right: base, top: base, bottom: base };
+}
+
+function isDecimalInteger(value: string): boolean {
+  return /^-?\d+$/.test(value.trim());
+}
+
+function formatSerialValue(value: string, pad: number): string {
+  const trimmed = value.trim();
+  if (pad <= 0 || !isDecimalInteger(trimmed)) {
+    return trimmed;
+  }
+  const negative = trimmed.startsWith("-");
+  const digits = negative ? trimmed.slice(1) : trimmed;
+  const padded = digits.padStart(pad, "0");
+  return negative ? `-${padded}` : padded;
+}
+
+function incrementSerialValue(current: string, increment: number): string {
+  const trimmed = current.trim();
+  if (!isDecimalInteger(trimmed)) {
+    return trimmed;
+  }
+  try {
+    return (BigInt(trimmed) + BigInt(increment)).toString();
+  } catch {
+    return trimmed;
+  }
+}
+
+function rotateOrientation180(orientation: Orientation): Orientation {
+  if (orientation === "N") {
+    return "I";
+  }
+  if (orientation === "I") {
+    return "N";
+  }
+  if (orientation === "R") {
+    return "B";
+  }
+  return "R";
+}
+
 function rotationFor(orientation: Orientation): number {
   if (orientation === "R") {
     return Math.PI / 2;
@@ -435,47 +834,247 @@ function drawAtAnchor(
   ctx.restore();
 }
 
+function orientedAabb(
+  anchorX: number,
+  anchorY: number,
+  orientation: Orientation,
+  localAnchorX: number,
+  localAnchorY: number,
+  width: number,
+  height: number
+): Rect {
+  const rotatedAnchor = rotatePoint(localAnchorX, localAnchorY, orientation);
+  const tx = anchorX - rotatedAnchor.x;
+  const ty = anchorY - rotatedAnchor.y;
+  const corners = [
+    rotatePoint(0, 0, orientation),
+    rotatePoint(width, 0, orientation),
+    rotatePoint(width, height, orientation),
+    rotatePoint(0, height, orientation)
+  ].map((point) => ({ x: tx + point.x, y: ty + point.y }));
+  const minX = Math.min(...corners.map((point) => point.x));
+  const maxX = Math.max(...corners.map((point) => point.x));
+  const minY = Math.min(...corners.map((point) => point.y));
+  const maxY = Math.max(...corners.map((point) => point.y));
+  return {
+    x: minX,
+    y: minY,
+    width: Math.max(0, maxX - minX),
+    height: Math.max(0, maxY - minY)
+  };
+}
+
+function rectInside(inner: Rect, outer: Rect): boolean {
+  return (
+    inner.x >= outer.x
+    && inner.y >= outer.y
+    && inner.x + inner.width <= outer.x + outer.width
+    && inner.y + inner.height <= outer.y + outer.height
+  );
+}
+
+function rectIntersects(a: Rect, b: Rect): boolean {
+  return (
+    a.x < b.x + b.width
+    && a.x + a.width > b.x
+    && a.y < b.y + b.height
+    && a.y + a.height > b.y
+  );
+}
+
 function normalizeZplText(value: string): string {
   return value.replace(/\\&/g, "\n").replace(/_0D_0A|_0A|_0D/g, "\n").trim();
+}
+
+function normalizeQrFieldData(value: string): string {
+  const trimmed = value.trim();
+  const match = trimmed.match(/^([A-Za-z0-9]{2}),(.*)$/s);
+  if (!match) {
+    return trimmed;
+  }
+  return match[2];
+}
+
+function parseQrFieldData(value: string): {
+  text: string;
+  eclevel: "L" | "M" | "Q" | "H" | null;
+} {
+  const trimmed = value.trim();
+  const match = trimmed.match(/^([LMQH])([ANMD]),(.*)$/s);
+  if (!match) {
+    return { text: normalizeQrFieldData(trimmed), eclevel: null };
+  }
+  const eclevel = match[1] as "L" | "M" | "Q" | "H";
+  return { text: match[3], eclevel };
+}
+
+function resolveFontFamily(sourceName: string): string {
+  const normalized = sourceName.trim().toUpperCase();
+  if (!normalized) {
+    return "'Segoe UI', Arial, sans-serif";
+  }
+  if (
+    normalized.includes("OCR")
+    || normalized.includes("MONO")
+    || normalized.includes("COURIER")
+    || normalized.startsWith("R:TT")
+  ) {
+    return "'Courier New', monospace";
+  }
+  if (normalized.includes("SWISS") || normalized.includes("HELV")) {
+    return "Arial, 'Helvetica Neue', sans-serif";
+  }
+  if (normalized.includes("DUTCH") || normalized.includes("ROMAN") || normalized.includes("SERIF")) {
+    return "'Times New Roman', Times, serif";
+  }
+  return "'Segoe UI', Arial, sans-serif";
+}
+
+function lineWidthWithStretch(ctx: CanvasRenderingContext2D, line: string, stretch: number): number {
+  return ctx.measureText(line).width * stretch;
+}
+
+function wrapTextForFieldBlock(
+  ctx: CanvasRenderingContext2D,
+  rawLines: string[],
+  maxWidth: number,
+  stretch: number
+): string[] {
+  const wrapped: string[] = [];
+  const safeWidth = Math.max(1, maxWidth);
+
+  const breakLongWord = (word: string): string[] => {
+    if (!word) {
+      return [""];
+    }
+    const chunks: string[] = [];
+    let current = "";
+    for (const char of word) {
+      const candidate = `${current}${char}`;
+      if (!current || lineWidthWithStretch(ctx, candidate, stretch) <= safeWidth) {
+        current = candidate;
+      } else {
+        chunks.push(current);
+        current = char;
+      }
+    }
+    if (current) {
+      chunks.push(current);
+    }
+    return chunks.length ? chunks : [word];
+  };
+
+  rawLines.forEach((line) => {
+    const source = line.trim();
+    if (!source) {
+      wrapped.push("");
+      return;
+    }
+
+    const words = source.split(/\s+/);
+    let currentLine = "";
+    words.forEach((word) => {
+      const candidate = currentLine ? `${currentLine} ${word}` : word;
+      if (lineWidthWithStretch(ctx, candidate, stretch) <= safeWidth) {
+        currentLine = candidate;
+        return;
+      }
+
+      if (currentLine) {
+        wrapped.push(currentLine);
+        currentLine = "";
+      }
+
+      if (lineWidthWithStretch(ctx, word, stretch) <= safeWidth) {
+        currentLine = word;
+        return;
+      }
+
+      const chunks = breakLongWord(word);
+      chunks.forEach((chunk, index) => {
+        if (index < chunks.length - 1) {
+          wrapped.push(chunk);
+        } else {
+          currentLine = chunk;
+        }
+      });
+    });
+
+    wrapped.push(currentLine);
+  });
+
+  return wrapped;
 }
 
 function measureTextLayout(
   ctx: CanvasRenderingContext2D,
   value: string,
   font: FontState,
-  scale: number
+  scale: number,
+  fieldBlock: FieldBlockState | null = null
 ): TextLayout {
   const fontPx = Math.max(9, font.height * scale);
-  const lineHeight = fontPx * 1.2;
-  const lines = value.split("\n");
+  const baseLineHeight = fontPx * 1.2;
   const fontWeight: "500" | "700" = font.bold ? "700" : "500";
   const stretch = clamp(font.width / Math.max(1, font.height), 0.65, 1.6);
+  const family = font.family || "'Segoe UI', Arial, sans-serif";
 
   ctx.save();
-  ctx.font = `${fontWeight} ${fontPx}px 'Segoe UI', Arial, sans-serif`;
-  const width =
-    lines.reduce((maxWidth, line) => Math.max(maxWidth, ctx.measureText(line).width), 0) * stretch;
+  ctx.font = `${fontWeight} ${fontPx}px ${family}`;
+  const baseLines = value.split("\n");
+  let lines = baseLines;
+  let offsets = new Array(lines.length).fill(0);
+  let width =
+    lines.reduce((maxWidth, line) => Math.max(maxWidth, lineWidthWithStretch(ctx, line, stretch)), 0);
+  let lineHeight = baseLineHeight;
+
+  if (fieldBlock) {
+    const blockWidth = Math.max(1, fieldBlock.width * scale);
+    const hangingIndentPx = Math.max(0, fieldBlock.hangingIndent * scale);
+    const wrappedWidth = Math.max(1, blockWidth - hangingIndentPx);
+    lines = wrapTextForFieldBlock(ctx, baseLines, wrappedWidth, stretch);
+    if (fieldBlock.maxLines > 0) {
+      lines = lines.slice(0, fieldBlock.maxLines);
+    }
+    width = blockWidth;
+    lineHeight = baseLineHeight + fieldBlock.lineSpacing * scale;
+    offsets = lines.map((line, index) => {
+      const baseIndent = index > 0 ? hangingIndentPx : 0;
+      const availableWidth = Math.max(1, blockWidth - baseIndent);
+      const lineWidth = lineWidthWithStretch(ctx, line, stretch);
+      if (fieldBlock.align === "C") {
+        return baseIndent + Math.max(0, (availableWidth - lineWidth) / 2);
+      }
+      if (fieldBlock.align === "R") {
+        return baseIndent + Math.max(0, availableWidth - lineWidth);
+      }
+      return baseIndent;
+    });
+  }
   ctx.restore();
 
   return {
     lines,
+    offsets,
     fontPx,
     lineHeight,
     width,
-    height: Math.max(lineHeight, lines.length * lineHeight),
+    height: Math.max(lineHeight, Math.max(1, lines.length) * lineHeight),
     baseline: fontPx * 0.8,
     stretch,
-    fontWeight
+    fontWeight,
+    family
   };
 }
 
 function drawTextLayout(ctx: CanvasRenderingContext2D, layout: TextLayout) {
-  ctx.font = `${layout.fontWeight} ${layout.fontPx}px 'Segoe UI', Arial, sans-serif`;
+  ctx.font = `${layout.fontWeight} ${layout.fontPx}px ${layout.family}`;
   ctx.textBaseline = "top";
   if (layout.stretch !== 1) {
     layout.lines.forEach((line, index) => {
       ctx.save();
-      ctx.translate(0, index * layout.lineHeight);
+      const offsetX = layout.offsets[index] ?? 0;
+      ctx.translate(offsetX, index * layout.lineHeight);
       ctx.scale(layout.stretch, 1);
       ctx.fillText(line, 0, 0);
       ctx.restore();
@@ -484,7 +1083,8 @@ function drawTextLayout(ctx: CanvasRenderingContext2D, layout: TextLayout) {
   }
 
   layout.lines.forEach((line, index) => {
-    ctx.fillText(line, 0, index * layout.lineHeight);
+    const offsetX = layout.offsets[index] ?? 0;
+    ctx.fillText(line, offsetX, index * layout.lineHeight);
   });
 }
 
@@ -690,7 +1290,7 @@ function encodeCode128(value: string, mode: "N" | "U" | "A"): { codes: number[];
     }
 
     const digitRun = countDigitRun(tokens, index);
-    const canUseSetC = digitRun >= 4;
+    const canUseSetC = mode !== "N" && digitRun >= 4;
     if (canUseSetC) {
       if (activeSet !== "C") {
         dataCodes.push(codeSetC);
@@ -844,13 +1444,22 @@ function render2dBarcode(
   reverse: boolean,
   addWarning: (message: string) => void
 ): HTMLCanvasElement | null {
-  const bcid = barcode.kind === "qr" ? "qrcode" : "datamatrix";
+  const bcid =
+    barcode.kind === "qr"
+      ? "qrcode"
+      : barcode.kind === "datamatrix"
+        ? "datamatrix"
+        : barcode.kind === "pdf417"
+          ? "pdf417"
+          : "maxicode";
   const symbolCanvas = document.createElement("canvas");
   const text = value || "0";
   const baseScale =
     barcode.kind === "qr"
-      ? barcode.moduleWidth * barcode.qrMagnification * scale
-      : barcode.moduleWidth * scale;
+      ? barcode.qrMagnification
+      : barcode.kind === "maxicode"
+        ? barcode.moduleWidth * barcode.qrMagnification * scale
+        : barcode.moduleWidth * scale;
   const symbolScale = Math.max(1, Math.min(12, Math.round(baseScale)));
 
   try {
@@ -867,7 +1476,9 @@ function render2dBarcode(
       barcolor: reverse ? "FFFFFF" : "111827"
     };
 
-    if (barcode.kind === "datamatrix") {
+    if (barcode.kind === "qr") {
+      options.eclevel = barcode.qrErrorCorrection;
+    } else if (barcode.kind === "datamatrix") {
       options.format = barcode.dataMatrixFormat;
       if (barcode.dataMatrixColumns > 0) {
         options.columns = barcode.dataMatrixColumns;
@@ -875,6 +1486,21 @@ function render2dBarcode(
       if (barcode.dataMatrixRows > 0) {
         options.rows = barcode.dataMatrixRows;
       }
+    } else if (barcode.kind === "pdf417") {
+      if (barcode.pdf417Columns > 0) {
+        options.columns = barcode.pdf417Columns;
+      }
+      if (barcode.pdf417Rows > 0) {
+        options.rows = barcode.pdf417Rows;
+      }
+      if (barcode.pdf417SecurityLevel >= 0) {
+        options.securitylevel = barcode.pdf417SecurityLevel;
+      }
+      if (barcode.pdf417Truncate) {
+        options.compact = true;
+      }
+    } else if (barcode.kind === "maxicode") {
+      options.mode = barcode.maxicodeMode;
     }
 
     bwipjs.toCanvas(symbolCanvas, options as unknown as Parameters<typeof bwipjs.toCanvas>[1]);
@@ -889,8 +1515,10 @@ function render2dBarcode(
 function buildBarcodeLayout(value: string, barcode: BarcodeState, scale: number): BarcodeLayout {
   const moduleWidth = Math.max(1, barcode.moduleWidth * scale);
   const barHeight = Math.max(24, barcode.height * scale);
-  const textHeight = barcode.showText && barcode.kind !== "qr" ? Math.max(10, 12 * scale) : 0;
-  const textGap = textHeight > 0 ? Math.max(2, 4 * scale) : 0;
+  const textHeight = barcode.showText && barcode.kind !== "qr"
+    ? Math.max(8, Math.min(11, barHeight * 0.16))
+    : 0;
+  const textGap = textHeight > 0 ? Math.max(2, 3 * scale) : 0;
 
   if (barcode.kind === "code39") {
     const prepared = prepareCode39(value, barcode.withCheckDigit);
@@ -939,15 +1567,17 @@ function drawTextField(
   font: FontState,
   positionMode: PositionMode,
   scale: number,
-  reverse: boolean
-) {
-  const layout = measureTextLayout(ctx, value, font, scale);
+  reverse: boolean,
+  fieldBlock: FieldBlockState | null
+): Rect {
+  const layout = measureTextLayout(ctx, value, font, scale, fieldBlock);
   const anchorY = positionMode === "FT" ? layout.baseline : 0;
 
   drawAtAnchor(ctx, x, y, font.orientation, 0, anchorY, () => {
     ctx.fillStyle = reverse ? "#ffffff" : "#111827";
     drawTextLayout(ctx, layout);
   });
+  return orientedAabb(x, y, font.orientation, 0, anchorY, layout.width, layout.height);
 }
 
 function drawBarcodeField(
@@ -960,17 +1590,30 @@ function drawBarcodeField(
   scale: number,
   reverse: boolean,
   addWarning: (message: string) => void
-) {
-  if (barcode.kind === "qr" || barcode.kind === "datamatrix") {
+): Rect | null {
+  if (
+    barcode.kind === "qr"
+    || barcode.kind === "datamatrix"
+    || barcode.kind === "pdf417"
+    || barcode.kind === "maxicode"
+  ) {
     const symbolCanvas = render2dBarcode(value, barcode, scale, reverse, addWarning);
     if (!symbolCanvas) {
-      return;
+      return null;
     }
-    const symbolWidth = symbolCanvas.width;
-    const symbolHeight = symbolCanvas.height;
+    let symbolWidth = symbolCanvas.width;
+    let symbolHeight = symbolCanvas.height;
+    let drawX = x;
+    let drawY = y;
+    if (barcode.kind === "qr") {
+      symbolWidth = Math.max(1, snapToPixel(symbolCanvas.width * scale * QR_DRAW_ADJUST));
+      symbolHeight = Math.max(1, snapToPixel(symbolCanvas.height * scale * QR_DRAW_ADJUST));
+      drawX += QR_X_SHIFT_DOTS * scale;
+      drawY += QR_Y_SHIFT_DOTS * scale;
+    }
     const anchorY = positionMode === "FT" ? symbolHeight : 0;
 
-    drawAtAnchor(ctx, x, y, barcode.orientation, 0, anchorY, () => {
+    drawAtAnchor(ctx, drawX, drawY, barcode.orientation, 0, anchorY, () => {
       if (reverse) {
         ctx.fillStyle = "#111827";
         ctx.fillRect(0, 0, symbolWidth, symbolHeight);
@@ -981,7 +1624,7 @@ function drawBarcodeField(
       ctx.lineWidth = Math.max(1, scale);
       ctx.strokeRect(0, 0, symbolWidth, symbolHeight);
     });
-    return;
+    return orientedAabb(drawX, drawY, barcode.orientation, 0, anchorY, symbolWidth, symbolHeight);
   }
 
   const layout = buildBarcodeLayout(value, barcode, scale);
@@ -1013,13 +1656,22 @@ function drawBarcodeField(
       const textY = barcode.showTextAbove
         ? 0
         : layout.symbolOffsetY + layout.symbolHeight + layout.textGap;
+      const isSmallCode128 = barcode.kind === "code128" && layout.barHeight <= 90;
       ctx.font = `${layout.textHeight}px 'Courier New', monospace`;
       ctx.textBaseline = "top";
       const textWidth = ctx.measureText(layout.printedText).width;
-      const textX = Math.max(0, (layout.symbolWidth - textWidth) / 2);
+      const baseTextX = Math.max(0, (layout.symbolWidth - textWidth) / 2);
+      const smallCode128Nudge = isSmallCode128 ? layout.moduleWidth * 24 : 0;
+      const textX = isSmallCode128
+        ? Math.max(0, baseTextX + smallCode128Nudge)
+        : Math.min(
+          Math.max(0, layout.symbolWidth - textWidth),
+          baseTextX + smallCode128Nudge
+        );
       ctx.fillText(layout.printedText, textX, textY);
     }
   });
+  return orientedAabb(x, y, barcode.orientation, 0, anchorY, layout.width, layout.height);
 }
 
 function drawGraphicBox(
@@ -1031,7 +1683,7 @@ function drawGraphicBox(
   thickness: number,
   scale: number,
   reverse: boolean
-) {
+): Rect {
   const pxThickness = Math.max(1, snapToPixel(thickness * scale));
   const pxWidth = Math.max(1, snapToPixel(width * scale));
   const pxHeight = Math.max(1, snapToPixel(height * scale));
@@ -1040,63 +1692,321 @@ function drawGraphicBox(
   if (reverse) {
     // Zebra-like ^FR behavior for ^GB: invert pixels inside the field box.
     invertRect(ctx, pxX, pxY, pxWidth, pxHeight);
-    return;
+    return { x: pxX, y: pxY, width: pxWidth, height: pxHeight };
   }
 
   ctx.fillStyle = "#111827";
 
   if (pxHeight <= pxThickness || pxWidth <= pxThickness) {
     ctx.fillRect(pxX, pxY, pxWidth, pxHeight);
-    return;
+    return { x: pxX, y: pxY, width: pxWidth, height: pxHeight };
   }
 
   ctx.fillRect(pxX, pxY, pxWidth, pxThickness);
   ctx.fillRect(pxX, pxY + pxHeight - pxThickness, pxWidth, pxThickness);
   ctx.fillRect(pxX, pxY, pxThickness, pxHeight);
   ctx.fillRect(pxX + pxWidth - pxThickness, pxY, pxThickness, pxHeight);
+  return { x: pxX, y: pxY, width: pxWidth, height: pxHeight };
 }
 
-function drawZplPreview(canvas: HTMLCanvasElement, zpl: string): DrawResult {
+function labelSizeToDots(size: number, unit: "in" | "mm" | "cm", dpi: number): number {
+  const safeSize = Math.max(0.1, size);
+  if (unit === "cm") {
+    return Math.max(1, Math.round((safeSize / 2.54) * dpi));
+  }
+  if (unit === "mm") {
+    return Math.max(1, Math.round((safeSize / 25.4) * dpi));
+  }
+  return Math.max(1, Math.round(safeSize * dpi));
+}
+
+function resolveLabelGeometryWithProfile(
+  tokens: ZplToken[],
+  printerSettings: PrinterSettings,
+  respectZplGeometry: boolean
+): { printWidth: number; labelLength: number } {
+  const defaultPrintWidth = labelSizeToDots(
+    printerSettings.labelWidth,
+    printerSettings.labelUnit,
+    printerSettings.dpi
+  );
+  const defaultLabelLength = labelSizeToDots(
+    printerSettings.labelHeight,
+    printerSettings.labelUnit,
+    printerSettings.dpi
+  );
+  let printWidth = defaultPrintWidth;
+  let labelLength = defaultLabelLength;
+
+  if (!respectZplGeometry) {
+    return { printWidth, labelLength };
+  }
+
+  tokens.forEach((token) => {
+    if (token.prefix !== "^") {
+      return;
+    }
+    const parts = token.args.split(",");
+    if (token.command === "PW") {
+      printWidth = clamp(parseInteger(parts[0], printWidth), 1, 32000);
+      return;
+    }
+    if (token.command === "LL") {
+      labelLength = clamp(parseInteger(parts[0], labelLength), 1, 32000);
+    }
+  });
+
+  return { printWidth, labelLength };
+}
+
+function createGraphicCanvas(
+  graphic: GraphicField,
+  color: { r: number; g: number; b: number } = { r: 17, g: 24, b: 39 }
+): HTMLCanvasElement {
+  const width = Math.max(1, graphic.bytesPerRow * 8);
+  const height = Math.max(1, graphic.rowCount);
+  const graphicCanvas = document.createElement("canvas");
+  graphicCanvas.width = width;
+  graphicCanvas.height = height;
+  const graphicCtx = graphicCanvas.getContext("2d");
+  if (!graphicCtx) {
+    return graphicCanvas;
+  }
+
+  const imageData = graphicCtx.createImageData(width, height);
+  const pixelData = imageData.data;
+  for (let y = 0; y < graphic.rowCount; y += 1) {
+    const rowOffset = y * graphic.bytesPerRow;
+    for (let byteIndex = 0; byteIndex < graphic.bytesPerRow; byteIndex += 1) {
+      const byte = graphic.bytes[rowOffset + byteIndex] ?? 0;
+      for (let bit = 0; bit < 8; bit += 1) {
+        if (((byte >> (7 - bit)) & 1) === 0) {
+          continue;
+        }
+        const x = byteIndex * 8 + bit;
+        const pixelOffset = (y * width + x) * 4;
+        pixelData[pixelOffset] = color.r;
+        pixelData[pixelOffset + 1] = color.g;
+        pixelData[pixelOffset + 2] = color.b;
+        pixelData[pixelOffset + 3] = 255;
+      }
+    }
+  }
+  graphicCtx.putImageData(imageData, 0, 0);
+  return graphicCanvas;
+}
+
+function drawGraphicField(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  graphic: GraphicField,
+  orientation: Orientation,
+  positionMode: PositionMode,
+  scale: number,
+  reverse: boolean,
+  magnificationX = 1,
+  magnificationY = 1
+): Rect {
+  const bitmapCanvas = createGraphicCanvas(
+    graphic,
+    reverse ? { r: 255, g: 255, b: 255 } : { r: 17, g: 24, b: 39 }
+  );
+  const drawWidth = Math.max(1, snapToPixel(bitmapCanvas.width * scale * Math.max(1, magnificationX)));
+  const drawHeight = Math.max(1, snapToPixel(bitmapCanvas.height * scale * Math.max(1, magnificationY)));
+  const anchorY = positionMode === "FT" ? drawHeight : 0;
+
+  drawAtAnchor(ctx, x, y, orientation, 0, anchorY, () => {
+    if (reverse) {
+      ctx.fillStyle = "#111827";
+      ctx.fillRect(0, 0, drawWidth, drawHeight);
+    }
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(bitmapCanvas, 0, 0, drawWidth, drawHeight);
+  });
+  return orientedAabb(x, y, orientation, 0, anchorY, drawWidth, drawHeight);
+}
+
+function drawZplPreview(
+  canvas: HTMLCanvasElement,
+  zpl: string,
+  printerSettings: PrinterSettings = DEFAULT_PRINTER_SETTINGS,
+  showNonPrintableZones = true,
+  respectZplGeometry = true,
+  renderOptions: DrawRenderOptions = { withChrome: true, fitToCanvas: true, textScale: 1 }
+): DrawResult {
   const ctx = canvas.getContext("2d");
   if (!ctx) {
     return {
       code128Debug: null,
-      warnings: ["Canvas context is unavailable."]
+      warnings: ["Canvas context is unavailable."],
+      diagnostics: [
+        {
+          line: 1,
+          command: "CANVAS",
+          severity: "error",
+          impact: "high",
+          kind: "data_warning",
+          message: "Canvas context is unavailable."
+        }
+      ]
     };
   }
 
   const width = canvas.width;
   const height = canvas.height;
-  const scaleX = (width - PADDING * 2) / LABEL_WIDTH;
-  const scaleY = (height - PADDING * 2) / LABEL_HEIGHT;
-  const scale = Math.min(scaleX, scaleY);
-  const renderLabelWidth = snapToPixel(LABEL_WIDTH * scale);
-  const renderLabelHeight = snapToPixel(LABEL_HEIGHT * scale);
-  const originX = snapToPixel((width - renderLabelWidth) / 2);
-  const originY = snapToPixel((height - renderLabelHeight) / 2);
+  const tokens = tokenizeZplCommands(zpl);
+  const geometry = resolveLabelGeometryWithProfile(tokens, printerSettings, respectZplGeometry);
+  const scale = renderOptions.fitToCanvas
+    ? Math.min((width - PADDING * 2) / geometry.printWidth, (height - PADDING * 2) / geometry.labelLength)
+    : 1;
+  const textScale = Math.max(0.5, renderOptions.textScale || 1);
+  const renderLabelWidth = snapToPixel(geometry.printWidth * scale);
+  const renderLabelHeight = snapToPixel(geometry.labelLength * scale);
+  const originX = renderOptions.fitToCanvas ? snapToPixel((width - renderLabelWidth) / 2) : 0;
+  const originY = renderOptions.fitToCanvas ? snapToPixel((height - renderLabelHeight) / 2) : 0;
+  const labelRect: Rect = {
+    x: originX,
+    y: originY,
+    width: renderLabelWidth,
+    height: renderLabelHeight
+  };
+  const marginsDots = nonPrintableMarginsDots(printerSettings);
+  const printableRect: Rect = {
+    x: originX + marginsDots.left * scale,
+    y: originY + marginsDots.top * scale,
+    width: Math.max(0, renderLabelWidth - (marginsDots.left + marginsDots.right) * scale),
+    height: Math.max(0, renderLabelHeight - (marginsDots.top + marginsDots.bottom) * scale)
+  };
 
   ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = "#e6effb";
-  ctx.fillRect(0, 0, width, height);
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(originX, originY, renderLabelWidth, renderLabelHeight);
-  ctx.strokeStyle = "#9caec9";
-  ctx.strokeRect(originX, originY, renderLabelWidth, renderLabelHeight);
+  if (renderOptions.withChrome) {
+    ctx.fillStyle = "#e6effb";
+    ctx.fillRect(0, 0, width, height);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(originX, originY, renderLabelWidth, renderLabelHeight);
+    ctx.strokeStyle = "#9caec9";
+    ctx.strokeRect(originX, originY, renderLabelWidth, renderLabelHeight);
+  } else {
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, width, height);
+  }
+  if (
+    renderOptions.withChrome
+    && showNonPrintableZones
+    && marginsDots.left + marginsDots.right + marginsDots.top + marginsDots.bottom > 0
+  ) {
+    ctx.save();
+    ctx.fillStyle = "rgba(239, 68, 68, 0.08)";
+    if (printableRect.y > labelRect.y) {
+      ctx.fillRect(labelRect.x, labelRect.y, labelRect.width, printableRect.y - labelRect.y);
+    }
+    const printableBottom = printableRect.y + printableRect.height;
+    const labelBottom = labelRect.y + labelRect.height;
+    if (printableBottom < labelBottom) {
+      ctx.fillRect(labelRect.x, printableBottom, labelRect.width, labelBottom - printableBottom);
+    }
+    if (printableRect.x > labelRect.x) {
+      ctx.fillRect(labelRect.x, printableRect.y, printableRect.x - labelRect.x, printableRect.height);
+    }
+    const printableRight = printableRect.x + printableRect.width;
+    const labelRight = labelRect.x + labelRect.width;
+    if (printableRight < labelRight) {
+      ctx.fillRect(printableRight, printableRect.y, labelRight - printableRight, printableRect.height);
+    }
+    ctx.restore();
+  }
 
-  const tokens = zpl.match(/\^[A-Z~][^^~]*/g) ?? [];
   let cursorX = 0;
   let cursorY = 0;
   let positionMode: PositionMode = "FO";
   let defaultOrientation: Orientation = "N";
+  let printOrientation: PrintOrientation = "N";
+  let labelHomeX = 0;
+  let labelHomeY = 0;
+  let labelTop = 0;
+  let labelShift = 0;
+  let printWidth = geometry.printWidth;
+  let labelLength = geometry.labelLength;
   let fieldReverse = false;
   let latestCode128Debug: Code128DebugInfo | null = null;
   let encoding: EncodingMode = "cp1252";
   let fieldHexIndicator: string | null = null;
+  let fieldBlock: FieldBlockState | null = null;
+  let currentFieldNumber: number | null = null;
+  let currentFieldHadData = false;
+  const downloadedGraphics = new Map<string, GraphicField>();
+  const fieldTemplates = new Map<number, FieldTemplate>();
+  const fieldValues = new Map<number, string>();
+  const fieldSerials = new Map<number, SerialState>();
+  const diagnostics: ZplDiagnostic[] = [];
+  const diagnosticKeys = new Set<string>();
   const warningSet = new Set<string>();
-  const addWarning = (message: string) => {
-    warningSet.add(message);
+  let activeToken: ZplToken | null = null;
+  const addDiagnostic = (
+    message: string,
+    options: {
+      severity?: ZplDiagnosticSeverity;
+      impact?: ZplDiagnosticImpact;
+      kind?: ZplDiagnosticKind;
+      command?: string;
+      line?: number;
+    } = {}
+  ) => {
+    const line = options.line ?? activeToken?.line ?? 1;
+    const command = (options.command ?? activeToken?.command ?? "UNKNOWN").toUpperCase();
+    const severity = options.severity ?? "warning";
+    const impact = options.impact ?? impactForCommand(command);
+    const kind = options.kind ?? "data_warning";
+    const key = `${line}|${command}|${severity}|${impact}|${kind}|${message}`;
+    if (!diagnosticKeys.has(key)) {
+      diagnostics.push({
+        line,
+        command,
+        severity,
+        impact,
+        kind,
+        message
+      });
+      diagnosticKeys.add(key);
+    }
+    if (severity !== "info") {
+      warningSet.add(`L${line} ^${command}: ${message}`);
+    }
   };
-  let font: FontState = { width: 24, height: 24, bold: false, orientation: "N" };
+  const addWarning = (message: string) => {
+    addDiagnostic(message, { severity: "warning", kind: "data_warning" });
+  };
+  const expectedDpi = densityDpmmToDpi(printerSettings.densityDpmm);
+  if (expectedDpi !== printerSettings.dpi) {
+    addDiagnostic(
+      `Printer profile has inconsistent density (${printerSettings.densityDpmm} dpmm) and dpi (${printerSettings.dpi}).`,
+      {
+        line: 1,
+        command: "PROFILE",
+        severity: "warning",
+        impact: "low",
+        kind: "invalid_args"
+      }
+    );
+  }
+  if (printerSettings.quality === "binary") {
+    addDiagnostic("Binary print quality enabled (preview remains anti-aliased).", {
+      line: 1,
+      command: "PROFILE",
+      severity: "info",
+      impact: "low",
+      kind: "fallback_used"
+    });
+  }
+  let font: FontState = {
+    width: 24,
+    height: 24,
+    bold: false,
+    orientation: "N",
+    family: "'Segoe UI', Arial, sans-serif",
+    sourceName: "A0"
+  };
   let barcode: BarcodeState = {
     kind: "none",
     orientation: "N",
@@ -1107,17 +2017,145 @@ function drawZplPreview(canvas: HTMLCanvasElement, zpl: string): DrawResult {
     showTextAbove: false,
     withCheckDigit: false,
     code128Mode: "N",
+    qrModel: 2,
+    qrErrorCorrection: "M",
     qrMagnification: 3,
     dataMatrixQuality: 200,
     dataMatrixColumns: 0,
     dataMatrixRows: 0,
     dataMatrixFormat: "square",
-    dataMatrixEscapeChar: "_"
+    dataMatrixEscapeChar: "_",
+    pdf417SecurityLevel: -1,
+    pdf417Columns: 0,
+    pdf417Rows: 0,
+    pdf417Truncate: false,
+    maxicodeMode: 4
+  };
+  const orientWithPrint = (orientation: Orientation): Orientation =>
+    printOrientation === "I" ? rotateOrientation180(orientation) : orientation;
+  const projectToCanvas = (x: number, y: number): { x: number; y: number } => {
+    let resolvedX = x + labelHomeX + labelShift;
+    let resolvedY = y + labelHomeY + labelTop;
+    if (printOrientation === "I") {
+      resolvedX = printWidth - resolvedX;
+      resolvedY = labelLength - resolvedY;
+    }
+    return {
+      x: originX + resolvedX * scale,
+      y: originY + resolvedY * scale
+    };
+  };
+  const decodeFieldValue = (raw: string): string => {
+    const normalized = normalizeZplText(raw);
+    const maybeHexDecoded = fieldHexIndicator
+      ? decodeFieldHex(normalized, fieldHexIndicator, encoding)
+      : { text: normalized, invalidSequences: 0 };
+    if (maybeHexDecoded.invalidSequences > 0 && fieldHexIndicator) {
+      addWarning(`^FH contains ${maybeHexDecoded.invalidSequences} invalid hex sequence(s).`);
+    }
+    const value = maybeHexDecoded.text
+      .split("")
+      .map((char) => (canEncodeChar(char, encoding) ? char : "?"))
+      .join("");
+    if (value !== maybeHexDecoded.text) {
+      addWarning(`Some characters cannot be encoded as ${encoding}. They were replaced with "?".`);
+    }
+    return value;
+  };
+  const resolveFieldTemplate = (): FieldTemplate | null => {
+    if (currentFieldNumber === null) {
+      return null;
+    }
+    return fieldTemplates.get(currentFieldNumber) ?? null;
+  };
+  const drawResolvedValue = (resolvedValue: string) => {
+    const template = resolveFieldTemplate();
+    const drawX = template?.x ?? cursorX;
+    const drawY = template?.y ?? cursorY;
+    const drawPositionMode = template?.positionMode ?? positionMode;
+    const drawFont = template?.font ?? font;
+    const drawBarcode = template?.barcode ?? barcode;
+    const drawReverse = template?.reverse ?? fieldReverse;
+    const drawFieldBlock = template?.fieldBlock ?? fieldBlock;
+    const point = projectToCanvas(drawX, drawY);
+    const checkPlacement = (bounds: Rect | null) => {
+      if (!bounds) {
+        return;
+      }
+      if (!rectInside(bounds, labelRect)) {
+        addDiagnostic("Element is outside printable label bounds.", {
+          kind: "data_warning",
+          severity: "warning",
+          impact: "high"
+        });
+      } else if (!rectInside(bounds, printableRect)) {
+        addDiagnostic("Element touches non-printable printer margin.", {
+          kind: "data_warning",
+          severity: "warning",
+          impact: "medium"
+        });
+      }
+    };
+    if (drawBarcode.kind === "none") {
+      const compactNumericValue = /^\d{1,3}$/.test(resolvedValue);
+      const qtyLikeNumberShiftX = compactNumericValue
+        && !drawFieldBlock
+        && drawPositionMode === "FO"
+        && drawFont.height >= 28
+        && drawFont.height <= 42
+        ? -Math.max(6, drawFont.width * scale * 0.3)
+        : 0;
+      const bounds = drawTextField(
+        ctx,
+        point.x + qtyLikeNumberShiftX,
+        point.y,
+        resolvedValue,
+        { ...drawFont, orientation: orientWithPrint(drawFont.orientation) },
+        drawPositionMode,
+        scale * textScale,
+        drawReverse,
+        drawFieldBlock
+      );
+      checkPlacement(bounds);
+      return;
+    }
+    const barcodeValue =
+      drawBarcode.kind === "datamatrix"
+        ? parseDataMatrixEscapes(resolvedValue, drawBarcode.dataMatrixEscapeChar, addWarning)
+        : drawBarcode.kind === "qr"
+          ? parseQrFieldData(resolvedValue).text
+        : resolvedValue;
+    const qrData = drawBarcode.kind === "qr" ? parseQrFieldData(resolvedValue) : null;
+    const barcodeForDraw =
+      drawBarcode.kind === "qr" && qrData?.eclevel
+        ? { ...drawBarcode, qrErrorCorrection: qrData.eclevel }
+        : drawBarcode;
+    if (drawBarcode.kind === "code128" && drawBarcode.code128Mode === "A") {
+      latestCode128Debug = buildCode128DebugInfo(barcodeValue, drawBarcode.code128Mode);
+    }
+    const bounds = drawBarcodeField(
+      ctx,
+      point.x,
+      point.y,
+      barcodeValue,
+      { ...barcodeForDraw, orientation: orientWithPrint(barcodeForDraw.orientation) },
+      drawPositionMode,
+      scale,
+      drawReverse,
+      addWarning
+    );
+    checkPlacement(bounds);
   };
 
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(originX, originY, renderLabelWidth, renderLabelHeight);
+  ctx.clip();
+
   tokens.forEach((token) => {
-    const command = token.slice(1, 3).toUpperCase();
-    const args = token.slice(3);
+    activeToken = token;
+    const command = token.command;
+    const args = token.args;
     const parts = args.split(",");
 
     if (command === "FO") {
@@ -1141,20 +2179,97 @@ function drawZplPreview(canvas: HTMLCanvasElement, zpl: string): DrawResult {
       return;
     }
 
+    if (command === "PW") {
+      printWidth = clamp(parseInteger(parts[0], printWidth), 1, 32000);
+      return;
+    }
+
+    if (command === "LL") {
+      labelLength = clamp(parseInteger(parts[0], labelLength), 1, 32000);
+      return;
+    }
+
+    if (command === "LH") {
+      labelHomeX = parseNumber(parts[0], labelHomeX);
+      labelHomeY = parseNumber(parts[1], labelHomeY);
+      return;
+    }
+
+    if (command === "LT") {
+      labelTop = parseNumber(parts[0], labelTop);
+      return;
+    }
+
+    if (command === "LS") {
+      labelShift = parseNumber(parts[0], labelShift);
+      return;
+    }
+
+    if (command === "PO") {
+      printOrientation = parsePrintOrientation(parts[0], printOrientation, addWarning);
+      return;
+    }
+
     if (command === "GB") {
       const boxWidth = parseNumber(parts[0], 0);
       const boxHeight = parseNumber(parts[1], 0);
       const thickness = Math.max(1, parseNumber(parts[2], 1));
-      drawGraphicBox(
+      const point = projectToCanvas(cursorX, cursorY);
+      const bounds = drawGraphicBox(
         ctx,
-        originX + cursorX * scale,
-        originY + cursorY * scale,
+        point.x,
+        point.y,
         boxWidth,
         boxHeight,
         thickness,
         scale,
         fieldReverse
       );
+      if (!rectInside(bounds, labelRect)) {
+        addDiagnostic("Graphic box exceeds label bounds.", {
+          kind: "data_warning",
+          severity: "warning",
+          impact: "high"
+        });
+      } else if (!rectInside(bounds, printableRect)) {
+        addDiagnostic("Graphic box touches non-printable printer margin.", {
+          kind: "data_warning",
+          severity: "warning",
+          impact: "medium"
+        });
+      }
+      return;
+    }
+
+    if (command === "DG" && token.prefix === "~") {
+      const [nameRaw, totalRaw, bytesPerRowRaw, dataRaw] = splitLeadingArgs(args, 4);
+      const normalizedName = normalizeGraphicName(nameRaw);
+      if (!normalizedName) {
+        addWarning("~DG command without a valid graphic name was ignored.");
+        return;
+      }
+      const bytesPerRow = Math.max(0, parseInteger(bytesPerRowRaw, 0));
+      const totalBytes = Math.max(0, parseInteger(totalRaw, 0));
+      if (bytesPerRow <= 0 || totalBytes <= 0) {
+        addWarning(`~DG ${normalizedName}: invalid dimensions (total=${totalRaw}, row=${bytesPerRowRaw}).`);
+        return;
+      }
+      const rowCount = Math.max(1, Math.ceil(totalBytes / bytesPerRow));
+      const bytes = parseAsciiHexGraphic(
+        dataRaw,
+        bytesPerRow,
+        rowCount,
+        `~DG ${normalizedName}`,
+        addWarning
+      );
+      if (!bytes) {
+        return;
+      }
+      downloadedGraphics.set(normalizedName, {
+        bytesPerRow,
+        rowCount,
+        bytes
+      });
       return;
     }
 
@@ -1171,28 +2286,57 @@ function drawZplPreview(canvas: HTMLCanvasElement, zpl: string): DrawResult {
       if (!isLikelyCfa && firstArg && firstArg !== "0" && firstArg !== "A") {
         addWarning(`Font "${firstArg}" is not available in preview. Falling back to A0.`);
       }
+      const sourceName = (firstArg && firstArg.length === 1 ? `A${firstArg}` : "A0").toUpperCase();
       font = {
         ...font,
         width,
         height,
         bold: height >= 40,
-        orientation: defaultOrientation
+        orientation: defaultOrientation,
+        sourceName,
+        family: resolveFontFamily(sourceName)
       };
       return;
     }
 
     if (command === "A0") {
+      const sourceName = `A0${(parts[0] ?? "").trim().toUpperCase()}`;
       font = {
         width: parseNumber(parts[2], font.width),
         height: parseNumber(parts[1], font.height),
         bold: parseNumber(parts[1], font.height) >= 40,
-        orientation: parseOrientation(parts[0], defaultOrientation)
+        orientation: parseOrientation(parts[0], defaultOrientation),
+        sourceName,
+        family: resolveFontFamily(sourceName)
+      };
+      return;
+    }
+
+    if (command === "A@") {
+      const sourceName = (parts[3] ?? "").trim();
+      if (!sourceName) {
+        addWarning("^A@ is missing font reference. Keeping current font.");
+        return;
+      }
+      const nextHeight = parseNumber(parts[1], font.height);
+      const nextWidth = parseNumber(parts[2], nextHeight || font.width);
+      font = {
+        width: nextWidth,
+        height: nextHeight,
+        bold: nextHeight >= 40,
+        orientation: parseOrientation(parts[0], defaultOrientation),
+        sourceName,
+        family: resolveFontFamily(sourceName)
       };
       return;
     }
 
     if (command.startsWith("A") && command !== "A0") {
-      addWarning(`Command ^${command} is not supported yet. Using A0 fallback where possible.`);
+      addDiagnostic(`Command ^${command} is not supported yet. Using A0 fallback where possible.`, {
+        kind: "fallback_used",
+        severity: "warning",
+        impact: "medium"
+      });
       return;
     }
 
@@ -1212,6 +2356,19 @@ function drawZplPreview(canvas: HTMLCanvasElement, zpl: string): DrawResult {
       return;
     }
 
+    if (command === "FN") {
+      const fieldNumber = parseFieldNumber(parts[0]);
+      if (fieldNumber === null) {
+        addWarning(`Invalid ^FN value "${parts[0] ?? ""}".`);
+        currentFieldNumber = null;
+        currentFieldHadData = false;
+        return;
+      }
+      currentFieldNumber = fieldNumber;
+      currentFieldHadData = false;
+      return;
+    }
+
     if (command === "BY") {
       barcode.moduleWidth = parseNumber(parts[0], barcode.moduleWidth);
       barcode.wideRatio = Math.max(2, parseNumber(parts[1], barcode.wideRatio));
@@ -1219,8 +2376,157 @@ function drawZplPreview(canvas: HTMLCanvasElement, zpl: string): DrawResult {
       return;
     }
 
+    if (command === "GF") {
+      const [formatRaw, totalRaw, bytesUsedRaw, bytesPerRowRaw, dataRaw] = splitLeadingArgs(args, 5);
+      const graphic = parseGraphicField(
+        formatRaw,
+        totalRaw,
+        bytesUsedRaw,
+        bytesPerRowRaw,
+        dataRaw,
+        "^GF",
+        addWarning
+      );
+      if (!graphic) {
+        return;
+      }
+      const point = projectToCanvas(cursorX, cursorY);
+      const bounds = drawGraphicField(
+        ctx,
+        point.x,
+        point.y,
+        graphic,
+        orientWithPrint(defaultOrientation),
+        positionMode,
+        scale,
+        fieldReverse
+      );
+      if (!rectInside(bounds, labelRect)) {
+        addDiagnostic("Graphic field exceeds label bounds.", {
+          kind: "data_warning",
+          severity: "warning",
+          impact: "high"
+        });
+      } else if (!rectInside(bounds, printableRect)) {
+        addDiagnostic("Graphic field touches non-printable printer margin.", {
+          kind: "data_warning",
+          severity: "warning",
+          impact: "medium"
+        });
+      }
+      return;
+    }
+
+    if (command === "XG") {
+      const [nameRaw, magnificationXRaw, magnificationYRaw] = splitLeadingArgs(args, 3);
+      const normalizedName = normalizeGraphicName(nameRaw);
+      if (!normalizedName) {
+        addWarning("^XG command without a valid graphic name was ignored.");
+        return;
+      }
+      const graphic = downloadedGraphics.get(normalizedName);
+      if (!graphic) {
+        addWarning(`^XG could not find graphic "${normalizedName}".`);
+        return;
+      }
+      const magnificationX = Math.max(1, parseInteger(magnificationXRaw, 1));
+      const magnificationY = Math.max(1, parseInteger(magnificationYRaw, 1));
+      const point = projectToCanvas(cursorX, cursorY);
+      const bounds = drawGraphicField(
+        ctx,
+        point.x,
+        point.y,
+        graphic,
+        orientWithPrint(defaultOrientation),
+        positionMode,
+        scale,
+        fieldReverse,
+        magnificationX,
+        magnificationY
+      );
+      if (!rectInside(bounds, labelRect)) {
+        addDiagnostic("Referenced graphic exceeds label bounds.", {
+          kind: "data_warning",
+          severity: "warning",
+          impact: "high"
+        });
+      } else if (!rectInside(bounds, printableRect)) {
+        addDiagnostic("Referenced graphic touches non-printable printer margin.", {
+          kind: "data_warning",
+          severity: "warning",
+          impact: "medium"
+        });
+      }
+      return;
+    }
+
     if (command === "FR") {
       fieldReverse = (parts[0] ?? "Y").trim().toUpperCase() !== "N";
+      return;
+    }
+
+    if (command === "FB") {
+      const widthDots = Math.max(1, parseNumber(parts[0], 1));
+      const maxLines = Math.max(0, parseInteger(parts[1], 0));
+      const lineSpacing = parseNumber(parts[2], 0);
+      const align = parseFieldBlockAlign(parts[3]);
+      const hangingIndent = Math.max(0, parseNumber(parts[4], 0));
+      if (align === "J") {
+        addWarning("^FB justification 'J' is approximated in preview.");
+      }
+      fieldBlock = {
+        width: widthDots,
+        maxLines,
+        lineSpacing,
+        align,
+        hangingIndent
+      };
+      return;
+    }
+
+    if (command === "FV") {
+      if (currentFieldNumber === null) {
+        addWarning("^FV used without active ^FN field number.");
+      }
+      const decoded = decodeFieldValue(args);
+      if (!decoded && decoded !== "") {
+        return;
+      }
+      if (currentFieldNumber !== null) {
+        fieldValues.set(currentFieldNumber, decoded);
+      }
+      drawResolvedValue(decoded);
+      currentFieldHadData = true;
+      return;
+    }
+
+    if (command === "SN") {
+      const startRaw = (parts[0] ?? "0").trim();
+      const increment = parseInteger(parts[1], 1);
+      const pad = Math.max(0, parseInteger(parts[2], 0));
+      const serialKey = currentFieldNumber;
+      const existing = serialKey !== null ? fieldSerials.get(serialKey) : null;
+      const state: SerialState =
+        existing && !(parts[0] ?? "").trim()
+          ? existing
+          : {
+              current: startRaw || "0",
+              increment,
+              pad
+            };
+      const displayValue = formatSerialValue(state.current, state.pad);
+      drawResolvedValue(displayValue);
+      if (serialKey !== null) {
+        fieldValues.set(serialKey, displayValue);
+        fieldSerials.set(serialKey, {
+          ...state,
+          current: incrementSerialValue(state.current, state.increment)
+        });
+      }
+      if (!isDecimalInteger(state.current) && state.increment !== 0) {
+        addWarning("^SN increment works only for numeric values in preview.");
+      }
+      currentFieldHadData = true;
       return;
     }
 
@@ -1253,11 +2559,17 @@ function drawZplPreview(canvas: HTMLCanvasElement, zpl: string): DrawResult {
     }
 
     if (command === "BQ") {
+      const modelRaw = parseInteger(parts[1], barcode.qrModel);
+      const model = modelRaw === 1 || modelRaw === 2 ? modelRaw : 2;
+      if (modelRaw !== 1 && modelRaw !== 2) {
+        addWarning(`^BQ model "${modelRaw}" is not supported. Using model 2.`);
+      }
       barcode = {
         ...barcode,
         kind: "qr",
         orientation: parseOrientation(parts[0], defaultOrientation),
-        moduleWidth: Math.max(1, parseNumber(parts[1], barcode.moduleWidth)),
+        qrModel: model,
+        qrErrorCorrection: barcode.qrErrorCorrection,
         qrMagnification: Math.max(1, parseNumber(parts[2], barcode.qrMagnification)),
         showText: false
       };
@@ -1308,53 +2620,93 @@ function drawZplPreview(canvas: HTMLCanvasElement, zpl: string): DrawResult {
       return;
     }
 
-    if (command === "FD") {
-      const normalized = normalizeZplText(args);
-      if (!normalized) {
-        return;
+    if (command === "B7") {
+      const rawSecurity = parseInteger(parts[2], barcode.pdf417SecurityLevel);
+      const securityLevel = clamp(rawSecurity, -1, 8);
+      const columns = Math.max(0, parseInteger(parts[3], 0));
+      const rows = Math.max(0, parseInteger(parts[4], 0));
+      const truncate = (parts[5] ?? "N").trim().toUpperCase() === "Y";
+
+      if (rawSecurity !== securityLevel) {
+        addWarning(`^B7 security level "${rawSecurity}" is out of range; using ${securityLevel}.`);
       }
-      const maybeHexDecoded = fieldHexIndicator
-        ? decodeFieldHex(normalized, fieldHexIndicator, encoding)
-        : { text: normalized, invalidSequences: 0 };
-      if (maybeHexDecoded.invalidSequences > 0 && fieldHexIndicator) {
-        addWarning(`^FH contains ${maybeHexDecoded.invalidSequences} invalid hex sequence(s).`);
+      if (columns > 30) {
+        addWarning("^B7 columns above 30 may not be supported by all printers.");
       }
-      const value = maybeHexDecoded.text
-        .split("")
-        .map((char) => (canEncodeChar(char, encoding) ? char : "?"))
-        .join("");
-      if (value !== maybeHexDecoded.text) {
-        addWarning(`Some characters cannot be encoded as ${encoding}. They were replaced with "?".`);
+      if (rows > 90) {
+        addWarning("^B7 rows above 90 may not be supported by all printers.");
       }
 
-      const x = originX + cursorX * scale;
-      const y = originY + cursorY * scale;
-      if (barcode.kind === "none") {
-        drawTextField(ctx, x, y, value, font, positionMode, scale, fieldReverse);
-      } else {
-        const renderedValue =
-          barcode.kind === "datamatrix"
-            ? parseDataMatrixEscapes(value, barcode.dataMatrixEscapeChar, addWarning)
-            : value;
-        if (barcode.kind === "code128" && barcode.code128Mode === "A") {
-          latestCode128Debug = buildCode128DebugInfo(renderedValue, barcode.code128Mode);
-        }
-        drawBarcodeField(
-          ctx,
-          x,
-          y,
-          renderedValue,
-          barcode,
-          positionMode,
-          scale,
-          fieldReverse,
-          addWarning
-        );
+      barcode = {
+        ...barcode,
+        kind: "pdf417",
+        orientation: parseOrientation(parts[0], defaultOrientation),
+        showText: false,
+        pdf417SecurityLevel: securityLevel,
+        pdf417Columns: columns,
+        pdf417Rows: rows,
+        pdf417Truncate: truncate
+      };
+      return;
+    }
+
+    if (command === "BD") {
+      const first = (parts[0] ?? "").trim();
+      const orientation = /^\d+$/.test(first)
+        ? defaultOrientation
+        : parseOrientation(parts[0], defaultOrientation);
+      const modeRaw = /^\d+$/.test(first) ? first : (parts[1] ?? "");
+      const parsedMode = parseInteger(modeRaw, barcode.maxicodeMode);
+      const mode = clamp(parsedMode, 2, 6);
+
+      if (parsedMode !== mode) {
+        addWarning(`^BD mode "${parsedMode}" is out of range; using ${mode}.`);
       }
+      if (mode === 2 || mode === 3) {
+        addWarning("^BD mode 2/3 requires structured primary data; invalid input may fail in preview.");
+      }
+
+      barcode = {
+        ...barcode,
+        kind: "maxicode",
+        orientation,
+        showText: false,
+        maxicodeMode: mode
+      };
+      return;
+    }
+
+    if (command === "FD") {
+      const decoded = decodeFieldValue(args);
+      if (!decoded && decoded !== "") {
+        return;
+      }
+      if (currentFieldNumber !== null) {
+        fieldValues.set(currentFieldNumber, decoded);
+      }
+      drawResolvedValue(decoded);
+      currentFieldHadData = true;
       return;
     }
 
     if (command === "FS") {
+      if (currentFieldNumber !== null && !currentFieldHadData) {
+        if (!fieldTemplates.has(currentFieldNumber)) {
+          fieldTemplates.set(currentFieldNumber, {
+            x: cursorX,
+            y: cursorY,
+            positionMode,
+            font: { ...font },
+            barcode: { ...barcode },
+            reverse: fieldReverse,
+            fieldBlock: fieldBlock ? { ...fieldBlock } : null
+          });
+        }
+        const presetValue = fieldValues.get(currentFieldNumber);
+        if (presetValue !== undefined) {
+          drawResolvedValue(presetValue);
+        }
+      }
       barcode.kind = "none";
       barcode.showText = true;
       barcode.showTextAbove = false;
@@ -1362,16 +2714,70 @@ function drawZplPreview(canvas: HTMLCanvasElement, zpl: string): DrawResult {
       barcode.orientation = defaultOrientation;
       fieldReverse = false;
       fieldHexIndicator = null;
+      fieldBlock = null;
+      currentFieldNumber = null;
+      currentFieldHadData = false;
+      return;
     }
+
+    if (
+      command === "XA"
+      || command === "XZ"
+      || command === "FX"
+      || command === "CI"
+      || command === "BY"
+      || command === "FW"
+    ) {
+      return;
+    }
+
+    addDiagnostic(`Command ${token.prefix}${command} is not supported by preview renderer.`, {
+      kind: "unsupported_command",
+      severity: "warning",
+      impact: impactForCommand(command)
+    });
   });
+
+  ctx.restore();
 
   return {
     code128Debug: latestCode128Debug,
-    warnings: Array.from(warningSet)
+    warnings: Array.from(warningSet),
+    diagnostics
   };
 }
 
-export function ZplCanvas({ zpl, onCode128DebugChange, onWarningsChange }: ZplCanvasProps) {
+export function renderLabelForExport(
+  zpl: string,
+  printerSettings: PrinterSettings = DEFAULT_PRINTER_SETTINGS,
+  respectZplGeometry = true
+): HTMLCanvasElement {
+  const tokens = tokenizeZplCommands(zpl);
+  const geometry = resolveLabelGeometryWithProfile(tokens, printerSettings, respectZplGeometry);
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, geometry.printWidth);
+  canvas.height = Math.max(1, geometry.labelLength);
+  drawZplPreview(
+    canvas,
+    zpl,
+    printerSettings,
+    false,
+    respectZplGeometry,
+    { withChrome: false, fitToCanvas: false, textScale: 1 }
+  );
+  return canvas;
+}
+
+export function ZplCanvas({
+  zpl,
+  onCode128DebugChange,
+  onWarningsChange,
+  onDiagnosticsChange,
+  onCanvasReady,
+  printerSettings = DEFAULT_PRINTER_SETTINGS,
+  showNonPrintableZones = true,
+  respectZplGeometry = true
+}: ZplCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -1379,20 +2785,46 @@ export function ZplCanvas({ zpl, onCode128DebugChange, onWarningsChange }: ZplCa
     if (!canvas) {
       return;
     }
-    const result = drawZplPreview(canvas, zpl);
+    const result = drawZplPreview(
+      canvas,
+      zpl,
+      printerSettings,
+      showNonPrintableZones,
+      respectZplGeometry
+    );
     if (onCode128DebugChange) {
       onCode128DebugChange(result.code128Debug);
     }
     if (onWarningsChange) {
       onWarningsChange(result.warnings);
     }
-  }, [onCode128DebugChange, onWarningsChange, zpl]);
+    if (onDiagnosticsChange) {
+      onDiagnosticsChange(result.diagnostics);
+    }
+  }, [
+    onCode128DebugChange,
+    onCanvasReady,
+    onDiagnosticsChange,
+    onWarningsChange,
+    printerSettings,
+    respectZplGeometry,
+    showNonPrintableZones,
+    zpl
+  ]);
+
+  useEffect(() => {
+    if (!onCanvasReady) {
+      return;
+    }
+    onCanvasReady(canvasRef.current);
+    return () => onCanvasReady(null);
+  }, [onCanvasReady]);
 
   return (
     <canvas
       ref={canvasRef}
-      width={700}
-      height={500}
+      width={1120}
+      height={820}
       className="preview-canvas"
       aria-label="ZPL preview canvas"
     />

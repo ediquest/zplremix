@@ -7,6 +7,8 @@ import { ZipUpload } from "./features/import/ZipUpload";
 import { PreviewPanel } from "./features/preview/PreviewPanel";
 
 const DEBOUNCE_MS = 250;
+const LS_PERSIST_KEY = "zplremix.persist_current_zpl";
+const LS_ZPL_KEY = "zplremix.current_zpl";
 
 const SAMPLE_ZPL = `^XA
 ^FO30,30^A0N,40,40^FDZPLRemix^FS
@@ -16,8 +18,25 @@ const SAMPLE_ZPL = `^XA
 ^XZ`;
 
 export default function App() {
-  const [rawInput, setRawInput] = useState<string>(SAMPLE_ZPL);
-  const [debouncedInput, setDebouncedInput] = useState<string>(SAMPLE_ZPL);
+  const [persistCurrentZpl, setPersistCurrentZpl] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem(LS_PERSIST_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const [rawInput, setRawInput] = useState<string>(() => {
+    try {
+      const persist = window.localStorage.getItem(LS_PERSIST_KEY) === "1";
+      if (!persist) {
+        return SAMPLE_ZPL;
+      }
+      return window.localStorage.getItem(LS_ZPL_KEY) || SAMPLE_ZPL;
+    } catch {
+      return SAMPLE_ZPL;
+    }
+  });
+  const [debouncedInput, setDebouncedInput] = useState<string>(rawInput);
   const [zipLabels, setZipLabels] = useState<LabelCandidate[]>([]);
   const [selectedLabelId, setSelectedLabelId] = useState<string | null>(null);
 
@@ -25,6 +44,20 @@ export default function App() {
     const timer = window.setTimeout(() => setDebouncedInput(rawInput), DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
   }, [rawInput]);
+
+  useEffect(() => {
+    try {
+      if (persistCurrentZpl) {
+        window.localStorage.setItem(LS_PERSIST_KEY, "1");
+        window.localStorage.setItem(LS_ZPL_KEY, rawInput);
+        return;
+      }
+      window.localStorage.removeItem(LS_ZPL_KEY);
+      window.localStorage.removeItem(LS_PERSIST_KEY);
+    } catch {
+      // Ignore localStorage failures in restricted environments.
+    }
+  }, [persistCurrentZpl, rawInput]);
 
   const decoded = useMemo(() => detectAndDecode(debouncedInput), [debouncedInput]);
   const labels = useMemo(
@@ -82,8 +115,11 @@ export default function App() {
           labels={availableLabels}
           selectedLabelId={selectedLabelId}
           onSelectLabel={onSelectLabel}
+          persistCurrentZpl={persistCurrentZpl}
+          onPersistCurrentZplChange={setPersistCurrentZpl}
         />
       </section>
+      <footer className="app-footer">© 2026 Adrian Sarczyński</footer>
     </main>
   );
 }

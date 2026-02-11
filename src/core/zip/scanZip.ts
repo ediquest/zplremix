@@ -1,6 +1,6 @@
 import JSZip from "jszip";
 import { detectAndDecode } from "../encoding/detectAndDecode";
-import type { LabelCandidate, ScanResult } from "../types";
+import type { InputMode, LabelCandidate, ScanResult } from "../types";
 import { extractLabels } from "../zpl/extractLabels";
 import { ALLOWED_EXTENSIONS, MAX_ZIP_ENTRIES } from "./limits";
 
@@ -22,6 +22,14 @@ export async function scanZip(file: File): Promise<ScanResult> {
   const entries = Object.values(zip.files).filter((item) => !item.dir);
   const warnings: string[] = [];
   const labels: LabelCandidate[] = [];
+  const modeCounts: Record<InputMode, number> = {
+    plain: 0,
+    base64: 0,
+    base64_gzip: 0
+  };
+  const fileSummaries: Array<{ name: string; mode: InputMode; labels: number }> = [];
+  let entriesScanned = 0;
+  let entriesWithLabels = 0;
 
   if (entries.length > MAX_ZIP_ENTRIES) {
     throw new Error(`ZIP contains too many files (${entries.length}).`);
@@ -33,16 +41,25 @@ export async function scanZip(file: File): Promise<ScanResult> {
     }
 
     try {
+      entriesScanned += 1;
       const bytes = await entry.async("uint8array");
       const text = decodeBytes(bytes);
       const decoded = detectAndDecode(text);
       const found = extractLabels(decoded.text, entry.name);
+      modeCounts[decoded.mode] += 1;
+      fileSummaries.push({
+        name: entry.name,
+        mode: decoded.mode,
+        labels: found.length
+      });
+      if (found.length) {
+        entriesWithLabels += 1;
+      }
       labels.push(...found);
     } catch {
       warnings.push(`Could not parse ${entry.name}`);
     }
   }
 
-  return { labels, warnings };
+  return { labels, warnings, entriesScanned, entriesWithLabels, modeCounts, fileSummaries };
 }
-
