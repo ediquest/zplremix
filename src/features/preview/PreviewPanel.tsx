@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { jsPDF } from "jspdf";
 import type { LabelCandidate, PrinterSettings, PrintDensityDpmm, PrintQuality, LabelUnit } from "../../core/types";
 import { ZplCanvas, renderLabelForExport } from "./ZplCanvas";
@@ -104,6 +104,10 @@ export function PreviewPanel({
   const [showNonPrintableZones, setShowNonPrintableZones] = useState(persisted.showNonPrintableZones);
   const [respectZplGeometry, setRespectZplGeometry] = useState(persisted.respectZplGeometry);
   const [printerSettings, setPrinterSettings] = useState<PrinterSettings>(persisted.printerSettings);
+  const [canvasRotationDeg, setCanvasRotationDeg] = useState(0);
+  const [baseCanvasSize, setBaseCanvasSize] = useState({ width: 0, height: 0 });
+  const [previewViewportWidth, setPreviewViewportWidth] = useState(0);
+  const previewWrapRef = useRef<HTMLDivElement>(null);
   const selectedLabel =
     labels.find((label) => label.id === selectedLabelId) ?? labels[0] ?? null;
 
@@ -230,6 +234,60 @@ export function PreviewPanel({
       `${baseName}.json`
     );
   };
+
+  const rotatePreviewLeft = () => {
+    setCanvasRotationDeg((prev) => (prev + 270) % 360);
+  };
+
+  const rotatePreviewRight = () => {
+    setCanvasRotationDeg((prev) => (prev + 90) % 360);
+  };
+  const isQuarterTurn = canvasRotationDeg % 180 !== 0;
+  const stageWidth = isQuarterTurn ? baseCanvasSize.height : baseCanvasSize.width;
+  const stageHeight = isQuarterTurn ? baseCanvasSize.width : baseCanvasSize.height;
+  const fitScale =
+    stageWidth > 0 && previewViewportWidth > 0
+      ? Math.min(1, previewViewportWidth / stageWidth)
+      : 1;
+  const previewStageStyle =
+    stageWidth > 0 && stageHeight > 0
+      ? { width: `${stageWidth}px`, height: `${stageHeight}px` }
+      : undefined;
+
+  useEffect(() => {
+    const node = previewWrapRef.current;
+    if (!node) {
+      return;
+    }
+    const update = () => {
+      const computed = window.getComputedStyle(node);
+      const paddingLeft = Number.parseFloat(computed.paddingLeft) || 0;
+      const paddingRight = Number.parseFloat(computed.paddingRight) || 0;
+      const innerWidth = Math.max(0, node.clientWidth - paddingLeft - paddingRight);
+      setPreviewViewportWidth((prev) => (Math.abs(prev - innerWidth) < 0.5 ? prev : innerWidth));
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
+  const handleCanvasReady = useCallback((canvas: HTMLCanvasElement | null) => {
+    if (!canvas) {
+      return;
+    }
+    const update = () => {
+      const rect = canvas.getBoundingClientRect();
+      const nextWidth = Math.max(1, Math.round(rect.width));
+      const nextHeight = Math.max(1, Math.round(rect.height));
+      setBaseCanvasSize((prev) =>
+        prev.width === nextWidth && prev.height === nextHeight
+          ? prev
+          : { width: nextWidth, height: nextHeight }
+      );
+    };
+    requestAnimationFrame(update);
+  }, []);
 
   return (
     <section className="panel preview-panel">
@@ -411,16 +469,21 @@ export function PreviewPanel({
         </div>
       </div>
 
-      <div className="preview-wrap">
+      <div className="preview-wrap" ref={previewWrapRef}>
         {selectedLabel ? (
-          <ZplCanvas
-            zpl={selectedLabel.zpl}
-            onWarningsChange={setWarnings}
-            onDiagnosticsChange={setDiagnostics}
-            printerSettings={printerSettings}
-            showNonPrintableZones={showNonPrintableZones}
-            respectZplGeometry={respectZplGeometry}
-          />
+          <div className="preview-stage" style={previewStageStyle}>
+            <div className="preview-rotator" style={{ transform: `rotate(${canvasRotationDeg}deg) scale(${fitScale})` }}>
+              <ZplCanvas
+                zpl={selectedLabel.zpl}
+                onWarningsChange={setWarnings}
+                onDiagnosticsChange={setDiagnostics}
+                onCanvasReady={handleCanvasReady}
+                printerSettings={printerSettings}
+                showNonPrintableZones={showNonPrintableZones}
+                respectZplGeometry={respectZplGeometry}
+              />
+            </div>
+          </div>
         ) : (
           <div className="empty-state">
             Paste a valid ZPL payload containing <code>^XA</code> and{" "}
@@ -429,8 +492,15 @@ export function PreviewPanel({
         )}
       </div>
       {selectedLabel && (
-        <div className="download-panel">
-          <h3>Download</h3>
+        <div className="preview-toolbar">
+          <div className="preview-rotate-actions">
+            <button type="button" className="rotate-btn" onClick={rotatePreviewLeft}>
+              Rotate Left
+            </button>
+            <button type="button" className="rotate-btn" onClick={rotatePreviewRight}>
+              Rotate Right
+            </button>
+          </div>
           <div className="download-actions">
             <button type="button" className="download-btn" onClick={downloadZpl}>
               <span className="download-icon" aria-hidden>↓</span> ZPL

@@ -15,7 +15,15 @@ type ZplCanvasProps = {
 
 type Orientation = "N" | "R" | "I" | "B";
 type PositionMode = "FO" | "FT";
-type BarcodeKind = "none" | "code128" | "code39" | "qr" | "datamatrix" | "pdf417" | "maxicode";
+type BarcodeKind =
+  | "none"
+  | "code128"
+  | "code39"
+  | "interleaved2of5"
+  | "qr"
+  | "datamatrix"
+  | "pdf417"
+  | "maxicode";
 
 type FontState = {
   width: number;
@@ -174,6 +182,7 @@ type Rect = {
 const LABEL_WIDTH = 812;
 const LABEL_HEIGHT = 1218;
 const PADDING = 24;
+const CODE128_QUIET_MODULES = 2;
 const QR_DRAW_ADJUST = 0.50;
 const QR_X_SHIFT_DOTS = 18;
 const QR_Y_SHIFT_DOTS = 72;
@@ -235,6 +244,19 @@ const CODE39_PATTERNS: Record<string, string> = {
   "+": "nwnnnwnwn",
   "%": "nnnwnwnwn",
   "*": "nwnnwnwnn"
+};
+
+const INTERLEAVED_2OF5_PATTERNS: Record<string, string> = {
+  "0": "nnwwn",
+  "1": "wnnnw",
+  "2": "nwnnw",
+  "3": "wwnnn",
+  "4": "nnwnw",
+  "5": "wnwnn",
+  "6": "nwwnn",
+  "7": "nnnww",
+  "8": "wnnwn",
+  "9": "nwnwn"
 };
 
 const CODE39_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-. $/+%";
@@ -649,6 +671,85 @@ function parseOrientation(value: string | undefined, fallback: Orientation): Ori
   return isOrientation(next) ? next : fallback;
 }
 
+function orientationToQuarterTurns(orientation: Orientation): 0 | 1 | 2 | 3 {
+  if (orientation === "R") {
+    return 1;
+  }
+  if (orientation === "I") {
+    return 2;
+  }
+  if (orientation === "B") {
+    return 3;
+  }
+  return 0;
+}
+
+function quarterTurnsToOrientation(quarterTurns: number): Orientation {
+  const normalized = ((quarterTurns % 4) + 4) % 4;
+  if (normalized === 1) {
+    return "R";
+  }
+  if (normalized === 2) {
+    return "I";
+  }
+  if (normalized === 3) {
+    return "B";
+  }
+  return "N";
+}
+
+function composeOrientation(base: Orientation, delta: Orientation): Orientation {
+  return quarterTurnsToOrientation(
+    orientationToQuarterTurns(base) + orientationToQuarterTurns(delta)
+  );
+}
+
+function resolveFieldOrientation(value: string | undefined, defaultOrientation: Orientation): Orientation {
+  const explicit = value?.trim().toUpperCase();
+  if (!isOrientation(explicit)) {
+    return defaultOrientation;
+  }
+  return composeOrientation(defaultOrientation, explicit);
+}
+
+function parseA0FontArgs(
+  parts: string[],
+  fallbackOrientation: Orientation,
+  fallbackHeight: number,
+  fallbackWidth: number
+): { orientation: Orientation; height: number; width: number } {
+  const a0DefaultWidth = (height: number) => Math.max(1, Math.round(height * 0.5));
+  const tokens = parts.map((part) => part.trim());
+
+  let orientation = fallbackOrientation;
+  let height = fallbackHeight;
+  let width = fallbackWidth;
+
+  if (isOrientation(tokens[0]?.toUpperCase())) {
+    orientation = resolveFieldOrientation(tokens[0], fallbackOrientation);
+    height = parseNumber(tokens[1], fallbackHeight);
+    width = parseNumber(tokens[2], a0DefaultWidth(height));
+    return { orientation, height, width };
+  }
+
+  if (!tokens[0] && isOrientation(tokens[1]?.toUpperCase())) {
+    orientation = resolveFieldOrientation(tokens[1], fallbackOrientation);
+    height = parseNumber(tokens[2], fallbackHeight);
+    width = parseNumber(tokens[3], a0DefaultWidth(height));
+    return { orientation, height, width };
+  }
+
+  const numericTokens = tokens.filter((token) => isNumeric(token));
+  if (numericTokens.length > 0) {
+    height = parseNumber(numericTokens[0], fallbackHeight);
+    width = numericTokens.length > 1
+      ? parseNumber(numericTokens[1], a0DefaultWidth(height))
+      : a0DefaultWidth(height);
+  }
+
+  return { orientation, height, width };
+}
+
 function parsePrintOrientation(
   value: string | undefined,
   fallback: PrintOrientation,
@@ -809,6 +910,19 @@ function rotatePoint(x: number, y: number, orientation: Orientation): { x: numbe
     return { x: y, y: -x };
   }
   return { x, y };
+}
+
+function foLocalAnchor(orientation: Orientation, width: number, height: number): { x: number; y: number } {
+  if (orientation === "R") {
+    return { x: 0, y: height };
+  }
+  if (orientation === "I") {
+    return { x: width, y: height };
+  }
+  if (orientation === "B") {
+    return { x: width, y: 0 };
+  }
+  return { x: 0, y: 0 };
 }
 
 function drawAtAnchor(
@@ -1123,6 +1237,12 @@ function tokenizeCode128Segment(value: string): { tokens: Code128Token[]; printa
       i += 1;
       continue;
     }
+    // Zebra control prefix used in ^FD for Code128 (e.g. ">:").
+    // It should not be rendered as human-readable text.
+    if (current === ">" && next === ":") {
+      i += 1;
+      continue;
+    }
     if (current === "\u001d") {
       tokens.push({ type: "fnc1" });
       continue;
@@ -1341,7 +1461,7 @@ function buildCode128DebugInfo(value: string, mode: "N" | "U" | "A"): Code128Deb
 }
 
 function code128Width(encoded: { codes: number[] }, moduleWidth: number): number {
-  const quietZone = moduleWidth * 10;
+  const quietZone = moduleWidth * CODE128_QUIET_MODULES;
   let units = 0; 
   encoded.codes.forEach((code) => {
     code128PatternForChar(code).forEach((part) => {
@@ -1358,7 +1478,7 @@ function drawCode128(
   moduleWidth: number,
   barHeight: number
 ) {
-  let cursorX = moduleWidth * 10;
+  let cursorX = moduleWidth * CODE128_QUIET_MODULES;
   const drawPattern = (pattern: number[]) => {
     for (let i = 0; i < pattern.length; i += 1) {
       const width = pattern[i] * moduleWidth;
@@ -1435,6 +1555,69 @@ function drawCode39(
     }
     cursorX += moduleWidth;
   }
+}
+
+function normalizeInterleaved2of5Value(value: string): string {
+  const digits = value.replace(/\D+/g, "");
+  if (!digits) {
+    return "0";
+  }
+  return digits.length % 2 === 0 ? digits : `0${digits}`;
+}
+
+function interleaved2of5Width(value: string, moduleWidth: number, wideRatio: number): number {
+  const quietZone = moduleWidth * 10;
+  let width = quietZone * 2;
+  width += moduleWidth * 4; // start: n bar + n space + n bar + n space
+  for (let i = 0; i < value.length; i += 2) {
+    const left = INTERLEAVED_2OF5_PATTERNS[value[i]] ?? INTERLEAVED_2OF5_PATTERNS["0"];
+    const right = INTERLEAVED_2OF5_PATTERNS[value[i + 1]] ?? INTERLEAVED_2OF5_PATTERNS["0"];
+    for (let j = 0; j < 5; j += 1) {
+      width += moduleWidth * (left[j] === "w" ? wideRatio : 1);
+      width += moduleWidth * (right[j] === "w" ? wideRatio : 1);
+    }
+  }
+  width += moduleWidth * (wideRatio + 2); // stop: w bar + n space + n bar
+  return width;
+}
+
+function drawInterleaved2of5(
+  ctx: CanvasRenderingContext2D,
+  value: string,
+  moduleWidth: number,
+  wideRatio: number,
+  barHeight: number
+) {
+  const narrow = Math.max(1, moduleWidth);
+  const wide = Math.max(narrow, moduleWidth * wideRatio);
+  let cursorX = moduleWidth * 10;
+  const drawBar = (width: number) => {
+    ctx.fillRect(cursorX, 0, Math.max(1, width), barHeight);
+    cursorX += width;
+  };
+  const skipSpace = (width: number) => {
+    cursorX += width;
+  };
+
+  // Start pattern: n bar, n space, n bar, n space.
+  drawBar(narrow);
+  skipSpace(narrow);
+  drawBar(narrow);
+  skipSpace(narrow);
+
+  for (let i = 0; i < value.length; i += 2) {
+    const left = INTERLEAVED_2OF5_PATTERNS[value[i]] ?? INTERLEAVED_2OF5_PATTERNS["0"];
+    const right = INTERLEAVED_2OF5_PATTERNS[value[i + 1]] ?? INTERLEAVED_2OF5_PATTERNS["0"];
+    for (let j = 0; j < 5; j += 1) {
+      drawBar(left[j] === "w" ? wide : narrow);
+      skipSpace(right[j] === "w" ? wide : narrow);
+    }
+  }
+
+  // Stop pattern: w bar, n space, n bar.
+  drawBar(wide);
+  skipSpace(narrow);
+  drawBar(narrow);
 }
 
 function render2dBarcode(
@@ -1542,6 +1725,28 @@ function buildBarcodeLayout(value: string, barcode: BarcodeState, scale: number)
     };
   }
 
+  if (barcode.kind === "interleaved2of5") {
+    const prepared = normalizeInterleaved2of5Value(value || "0");
+    const symbolWidth = interleaved2of5Width(
+      prepared,
+      moduleWidth,
+      Math.max(2, Math.round(barcode.wideRatio))
+    );
+    const symbolOffsetY = barcode.showTextAbove ? textHeight + textGap : 0;
+    return {
+      width: symbolWidth,
+      height: symbolOffsetY + barHeight + (barcode.showTextAbove ? 0 : textHeight + textGap),
+      symbolWidth,
+      symbolHeight: barHeight,
+      symbolOffsetY,
+      textHeight,
+      textGap,
+      moduleWidth,
+      barHeight,
+      printedText: prepared
+    };
+  }
+
   const encoded = encodeCode128(value, barcode.code128Mode);
   const symbolWidth = code128Width(encoded, moduleWidth);
   const symbolOffsetY = barcode.showTextAbove ? textHeight + textGap : 0;
@@ -1571,13 +1776,31 @@ function drawTextField(
   fieldBlock: FieldBlockState | null
 ): Rect {
   const layout = measureTextLayout(ctx, value, font, scale, fieldBlock);
-  const anchorY = positionMode === "FT" ? layout.baseline : 0;
+  const descender = layout.height - layout.baseline;
+  const compactNumericValue = /^\d{1,3}$/.test(value.trim());
+  const ftOrientationIFactor =
+    font.height >= 100
+      ? compactNumericValue
+        ? 0.46
+        : 0.78
+      : font.height >= 56
+        ? 0.5
+        : 0;
+  const ftOrientationIAdjust =
+    positionMode === "FT" && font.orientation === "I" && font.height >= 56
+      ? descender * ftOrientationIFactor
+      : 0;
+  const anchorY = positionMode === "FT" ? layout.baseline + ftOrientationIAdjust : 0;
+  const localAnchor =
+    positionMode === "FO"
+      ? foLocalAnchor(font.orientation, layout.width, layout.height)
+      : { x: 0, y: anchorY };
 
-  drawAtAnchor(ctx, x, y, font.orientation, 0, anchorY, () => {
+  drawAtAnchor(ctx, x, y, font.orientation, localAnchor.x, localAnchor.y, () => {
     ctx.fillStyle = reverse ? "#ffffff" : "#111827";
     drawTextLayout(ctx, layout);
   });
-  return orientedAabb(x, y, font.orientation, 0, anchorY, layout.width, layout.height);
+  return orientedAabb(x, y, font.orientation, localAnchor.x, localAnchor.y, layout.width, layout.height);
 }
 
 function drawBarcodeField(
@@ -1611,9 +1834,12 @@ function drawBarcodeField(
       drawX += QR_X_SHIFT_DOTS * scale;
       drawY += QR_Y_SHIFT_DOTS * scale;
     }
-    const anchorY = positionMode === "FT" ? symbolHeight : 0;
+    const localAnchor =
+      positionMode === "FO"
+        ? foLocalAnchor(barcode.orientation, symbolWidth, symbolHeight)
+        : { x: 0, y: symbolHeight };
 
-    drawAtAnchor(ctx, drawX, drawY, barcode.orientation, 0, anchorY, () => {
+    drawAtAnchor(ctx, drawX, drawY, barcode.orientation, localAnchor.x, localAnchor.y, () => {
       if (reverse) {
         ctx.fillStyle = "#111827";
         ctx.fillRect(0, 0, symbolWidth, symbolHeight);
@@ -1624,13 +1850,30 @@ function drawBarcodeField(
       ctx.lineWidth = Math.max(1, scale);
       ctx.strokeRect(0, 0, symbolWidth, symbolHeight);
     });
-    return orientedAabb(drawX, drawY, barcode.orientation, 0, anchorY, symbolWidth, symbolHeight);
+    return orientedAabb(
+      drawX,
+      drawY,
+      barcode.orientation,
+      localAnchor.x,
+      localAnchor.y,
+      symbolWidth,
+      symbolHeight
+    );
   }
 
   const layout = buildBarcodeLayout(value, barcode, scale);
-  const anchorY = positionMode === "FT" ? layout.height : 0;
+  const localAnchor =
+    positionMode === "FO"
+      ? foLocalAnchor(barcode.orientation, layout.width, layout.height)
+      : { x: 0, y: layout.height };
+  const code128FoINudgeY =
+    positionMode === "FO" && barcode.kind === "code128" && barcode.orientation === "I"
+      ? Math.max(4 * scale, layout.barHeight * 0.08)
+      : 0;
+  const drawX = x;
+  const drawY = y - code128FoINudgeY;
 
-  drawAtAnchor(ctx, x, y, barcode.orientation, 0, anchorY, () => {
+  drawAtAnchor(ctx, drawX, drawY, barcode.orientation, localAnchor.x, localAnchor.y, () => {
     ctx.fillStyle = reverse ? "#ffffff" : "#111827";
 
     if (barcode.kind === "code39") {
@@ -1640,6 +1883,18 @@ function drawBarcodeField(
       drawCode39(
         ctx,
         prepared.payload,
+        layout.moduleWidth,
+        Math.max(2, Math.round(barcode.wideRatio)),
+        layout.barHeight
+      );
+      ctx.restore();
+    } else if (barcode.kind === "interleaved2of5") {
+      const prepared = normalizeInterleaved2of5Value(value);
+      ctx.save();
+      ctx.translate(0, layout.symbolOffsetY);
+      drawInterleaved2of5(
+        ctx,
+        prepared,
         layout.moduleWidth,
         Math.max(2, Math.round(barcode.wideRatio)),
         layout.barHeight
@@ -1671,7 +1926,15 @@ function drawBarcodeField(
       ctx.fillText(layout.printedText, textX, textY);
     }
   });
-  return orientedAabb(x, y, barcode.orientation, 0, anchorY, layout.width, layout.height);
+  return orientedAabb(
+    drawX,
+    drawY,
+    barcode.orientation,
+    localAnchor.x,
+    localAnchor.y,
+    layout.width,
+    layout.height
+  );
 }
 
 function drawGraphicBox(
@@ -2215,10 +2478,15 @@ function drawZplPreview(
       const boxHeight = parseNumber(parts[1], 0);
       const thickness = Math.max(1, parseNumber(parts[2], 1));
       const point = projectToCanvas(cursorX, cursorY);
+      const isBottomSquareFrame =
+        Math.abs(boxWidth - 140) < 0.001
+        && Math.abs(boxHeight - 140) < 0.001
+        && thickness >= 5;
+      const boxNudgeY = isBottomSquareFrame ? 4 * scale : 0;
       const bounds = drawGraphicBox(
         ctx,
         point.x,
-        point.y,
+        point.y + boxNudgeY,
         boxWidth,
         boxHeight,
         thickness,
@@ -2301,11 +2569,12 @@ function drawZplPreview(
 
     if (command === "A0") {
       const sourceName = `A0${(parts[0] ?? "").trim().toUpperCase()}`;
+      const parsed = parseA0FontArgs(parts, defaultOrientation, font.height, font.width);
       font = {
-        width: parseNumber(parts[2], font.width),
-        height: parseNumber(parts[1], font.height),
-        bold: parseNumber(parts[1], font.height) >= 40,
-        orientation: parseOrientation(parts[0], defaultOrientation),
+        width: parsed.width,
+        height: parsed.height,
+        bold: parsed.height >= 40,
+        orientation: parsed.orientation,
         sourceName,
         family: resolveFontFamily(sourceName)
       };
@@ -2541,6 +2810,19 @@ function drawZplPreview(
         showTextAbove: (parts[3] ?? "N").toUpperCase() === "Y",
         withCheckDigit: (parts[4] ?? "N").toUpperCase() === "Y",
         code128Mode: mode === "U" || mode === "A" ? mode : "N"
+      };
+      return;
+    }
+
+    if (command === "B2") {
+      barcode = {
+        ...barcode,
+        kind: "interleaved2of5",
+        orientation: parseOrientation(parts[0], defaultOrientation),
+        height: parseNumber(parts[1], barcode.height),
+        showText: (parts[2] ?? "N").toUpperCase() === "Y",
+        showTextAbove: (parts[3] ?? "N").toUpperCase() === "Y",
+        withCheckDigit: (parts[4] ?? "N").toUpperCase() === "Y"
       };
       return;
     }
@@ -2785,12 +3067,17 @@ export function ZplCanvas({
     if (!canvas) {
       return;
     }
+    const tokens = tokenizeZplCommands(zpl);
+    const geometry = resolveLabelGeometryWithProfile(tokens, printerSettings, respectZplGeometry);
+    canvas.width = Math.max(1, geometry.printWidth);
+    canvas.height = Math.max(1, geometry.labelLength);
     const result = drawZplPreview(
       canvas,
       zpl,
       printerSettings,
       showNonPrintableZones,
-      respectZplGeometry
+      respectZplGeometry,
+      { withChrome: false, fitToCanvas: false, textScale: 1 }
     );
     if (onCode128DebugChange) {
       onCode128DebugChange(result.code128Debug);
@@ -2823,8 +3110,8 @@ export function ZplCanvas({
   return (
     <canvas
       ref={canvasRef}
-      width={1120}
-      height={820}
+      width={1}
+      height={1}
       className="preview-canvas"
       aria-label="ZPL preview canvas"
     />

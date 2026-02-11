@@ -1,4 +1,4 @@
-import { useMemo, useRef } from "react";
+import { useMemo, useRef, useState } from "react";
 
 type EditorPanelProps = {
   rawInput: string;
@@ -74,9 +74,46 @@ function renderHighlightedZpl(source: string) {
   return parts;
 }
 
+function beautifyZpl(source: string) {
+  const normalized = source.replace(/\r\n?/g, "\n");
+  const commandRegex = /[\^~][A-Z0-9]{1,3}/gi;
+  const positions: number[] = [];
+  let match = commandRegex.exec(normalized);
+
+  while (match) {
+    positions.push(match.index);
+    match = commandRegex.exec(normalized);
+  }
+
+  if (!positions.length) {
+    return normalized;
+  }
+
+  const lines: string[] = [];
+
+  if (positions[0] > 0) {
+    const prefix = normalized.slice(0, positions[0]).trim();
+    if (prefix) {
+      lines.push(prefix);
+    }
+  }
+
+  for (let i = 0; i < positions.length; i += 1) {
+    const start = positions[i];
+    const end = i + 1 < positions.length ? positions[i + 1] : normalized.length;
+    const chunk = normalized.slice(start, end).replace(/^\n+|\n+$/g, "");
+    if (chunk) {
+      lines.push(chunk);
+    }
+  }
+
+  return lines.join("\n");
+}
+
 export function EditorPanel({ rawInput, onInputChange }: EditorPanelProps) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const highlightRef = useRef<HTMLPreElement>(null);
+  const [wrapEnabled, setWrapEnabled] = useState(false);
   const highlighted = useMemo(() => renderHighlightedZpl(rawInput), [rawInput]);
 
   const syncScroll = () => {
@@ -87,19 +124,36 @@ export function EditorPanel({ rawInput, onInputChange }: EditorPanelProps) {
     highlightRef.current.scrollLeft = inputRef.current.scrollLeft;
   };
 
+  const handleBeautify = () => {
+    onInputChange(beautifyZpl(rawInput));
+  };
+
   return (
     <section className="panel">
-      <div className="panel-header">
+      <div className="panel-header editor-panel-header">
         <h2>ZPL Input</h2>
+        <div className="editor-actions">
+          <button
+            type="button"
+            className={`editor-action-btn${wrapEnabled ? " is-active" : ""}`}
+            onClick={() => setWrapEnabled((prev) => !prev)}
+            aria-pressed={wrapEnabled}
+          >
+            Wrap: {wrapEnabled ? "ON" : "OFF"}
+          </button>
+          <button type="button" className="editor-action-btn" onClick={handleBeautify}>
+            Beautify
+          </button>
+        </div>
       </div>
       <div className="editor-shell">
-        <pre className="editor-highlight" ref={highlightRef} aria-hidden>
+        <pre className={`editor-highlight${wrapEnabled ? " is-wrapped" : ""}`} ref={highlightRef} aria-hidden>
           {highlighted}
           {"\n"}
         </pre>
         <textarea
           ref={inputRef}
-          className="editor-input"
+          className={`editor-input${wrapEnabled ? " is-wrapped" : ""}`}
           value={rawInput}
           onChange={(e) => onInputChange(e.target.value)}
           onScroll={syncScroll}
