@@ -13,13 +13,55 @@ const DEBOUNCE_MS = 250;
 const LS_PERSIST_KEY = "zplremix.persist_current_zpl";
 const LS_ZPL_KEY = "zplremix.current_zpl";
 const LS_THEME_KEY = "zplremix.theme";
-type ThemeMode = "light" | "dark-plus" | "abyss";
+type ThemeMode = "light" | "dark" | "dark-plus" | "abyss";
 
 const SAMPLE_ZPL = `^XA
-^FO30,30^A0N,40,40^FDZPLRemix^FS
-^FO30,90^GB740,3,3^FS
-^FO30,120^A0N,28,28^FDLive preview foundation^FS
-^FO30,170^BY2,2,80^BCN,80,Y,N,N^FD1234567890^FS
+^PW813
+^LL1219
+^LH0,0
+^FO20,20^GB772,1178,4^FS
+^FO40,40^A0N,42,42^FDLOGISTICS LABEL^FS
+^FO40,90^A0N,22,22^FDCarrier: AS  Service: PARCEL^FS
+^FO620,40^A0N,28,28^FDZONE^FS
+^FO700,30^A0N,90,90^FD3^FS
+^FO40,130^GFA,128,128,8,FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00^FS
+^FO40,190^GB732,240,3^FS
+^FO55,205^A0N,28,28^FDSHIP TO^FS
+^FO55,240^A0N,28,28^FDACME Sp. z o.o.^FS
+^FO55,275^A0N,24,24^FDul. Magazynowa 12^FS
+^FO55,305^A0N,24,24^FD55-040 Bielany Wroclawskie^FS
+^FO55,335^A0N,24,24^FDPOLAND^FS
+^FO520,240^A0N,22,22^FDPhone:^FS
+^FO520,265^A0N,24,24^FD+48 600 700 800^FS
+^FO40,450^GB732,150,3^FS
+^FO55,465^A0N,26,26^FDFROM^FS
+^FO55,500^A0N,26,26^FDWarehouse PL01^FS
+^FO55,530^A0N,22,22^FDul. Logistyczna 1, 59-225 Chojnow^FS
+^FO40,620^GB732,120,3^FS
+^FO55,635^A0N,24,24^FDROUTE:^FS
+^FO155,635^A0N,28,28^FDWRO-LEG-CHO^FS
+^FO55,670^A0N,24,24^FDSHIP DATE:^FS
+^FO190,670^A0N,24,24^FD2026-02-11^FS
+^FO55,705^A0N,24,24^FDPO:^FS
+^FO120,705^A0N,24,24^FDPO-908771^FS
+^FO320,705^A0N,24,24^FDORDER:^FS
+^FO420,705^A0N,24,24^FDORD-00014521^FS
+^FO620,705^A0N,24,24^FDPKG:^FS
+^FO690,695^A0N,42,42^FD1/3^FS
+^FO40,760^GB732,250,3^FS
+^FO55,775^A0N,26,26^FDTRACKING / SSCC^FS
+^FO70,810^BCN,120,N,N,N
+^FD00359012345678901234^FS
+^FO70,945^A0N,28,28^FD00359012345678901234^FS
+^FO40,1030^GB400,150,3^FS
+^FO55,1045^A0N,24,24^FDGTIN^FS
+^FO72,1081^BY2,2,48^BCN,48,Y,N,N^FD059012345678^FS
+^FO55,1145^A0N,24,24^FDQTY:^FS
+^FO120,1142^A0N,32,32^FD24^FS
+^FO460,1030^GB312,150,3^FS
+^FO475,1045^A0N,24,24^FDQR DATA^FS
+^FO545,995^BQN,2,3
+^FDLA,{"order":"ORD-00014521","sscc":"00359012345678901234","gtin":"05901234567890","qty":24}^FS
 ^XZ`;
 
 const VISUAL_ZPL_HINT_RE = /\^(FO|FT|FD|FV|GB|GC|GD|GE|GF|XG|BC|BE|B2|B3|BQ|BX|B7|BD|A0|A@|CF|FB)\b/i;
@@ -36,7 +78,7 @@ export default function App() {
   const [theme, setTheme] = useState<ThemeMode>(() => {
     try {
       const stored = window.localStorage.getItem(LS_THEME_KEY);
-      if (stored === "light" || stored === "dark-plus" || stored === "abyss") {
+      if (stored === "light" || stored === "dark" || stored === "dark-plus" || stored === "abyss") {
         return stored;
       }
     } catch {
@@ -196,6 +238,7 @@ export default function App() {
                 onChange={(event) => setTheme(event.target.value as ThemeMode)}
               >
                 <option value="light">Light</option>
+                <option value="dark">Dark (Visual Studio)</option>
                 <option value="dark-plus">Dark+</option>
                 <option value="abyss">Abyss</option>
               </select>

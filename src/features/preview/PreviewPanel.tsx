@@ -8,7 +8,7 @@ const LS_PREVIEW_SETTINGS_KEY = "zplremix.preview.settings";
 
 type PreviewPanelProps = {
   mode: string;
-  theme: "light" | "dark-plus" | "abyss";
+  theme: "light" | "dark" | "dark-plus" | "abyss";
   labels: LabelCandidate[];
   selectedLabelId: string | null;
   onOpenBuilder: (zpl?: string) => void;
@@ -217,7 +217,7 @@ export function PreviewPanel({
     }),
     [printEngineOverrideEnabled, printEngineDarkness, printEngineSpeedIps]
   );
-  const labelPaperColor = theme === "light" ? "#ffffff" : theme === "dark-plus" ? "#d9dde3" : "#d3d8df";
+  const labelPaperColor = theme === "light" ? "#ffffff" : theme === "dark" ? "#e3e6eb" : theme === "dark-plus" ? "#d9dde3" : "#d3d8df";
 
   const saveBlob = (blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob);
@@ -356,9 +356,9 @@ export function PreviewPanel({
 
   return (
     <section className="panel preview-panel">
-      <div className="panel-header">
+      <div className="panel-header preview-header">
         <h2>Preview</h2>
-        <p className="muted">Detected mode: {mode}</p>
+        <p className="preview-mode">Detected mode: {mode}</p>
       </div>
 
       <div className="preview-wrap" ref={previewWrapRef}>

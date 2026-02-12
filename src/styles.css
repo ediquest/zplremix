@@ -24,10 +24,49 @@
   --diag-bg: #f4f8ff;
   --diag-border: #b4c6e6;
   --diag-text: #243654;
+  --zpl-token-marker: #2563eb;
+  --zpl-token-command: #1d4ed8;
+  --zpl-token-block: #7c3aed;
+  --zpl-token-field: #0f766e;
+  --zpl-token-number: #b45309;
   font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
   color: var(--text-main);
   background: var(--bg-main);
   color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --bg-main: radial-gradient(circle at 20% 10%, #2a2a2a, #1e1e1e);
+  --text-main: #d4d4d4;
+  --text-muted: #9da5b4;
+  --surface-main: rgba(37, 37, 38, 0.94);
+  --surface-soft: #2d2d30;
+  --surface-soft-2: #252526;
+  --border-main: #3f3f46;
+  --border-soft: #4c4c54;
+  --accent: #0e639c;
+  --accent-border: #1177bb;
+  --btn-bg: #3c3c3c;
+  --btn-bg-grad-start: #3f3f46;
+  --btn-bg-grad-end: #34343a;
+  --btn-text: #f3f3f3;
+  --input-bg: #3c3c3c;
+  --canvas-bg: #252526;
+  --grid-line: rgba(130, 130, 140, 0.2);
+  --label-paper: #e3e6eb;
+  --thumb-image-filter: brightness(0.86) saturate(0.9);
+  --warn-bg: #3a2f1f;
+  --warn-border: #8c6f3c;
+  --warn-text: #f1d9a3;
+  --diag-bg: #2a313f;
+  --diag-border: #4b5f7d;
+  --diag-text: #c6d5ef;
+  --zpl-token-marker: #4da3ff;
+  --zpl-token-command: #2f81f7;
+  --zpl-token-block: #c586c0;
+  --zpl-token-field: #4ec9b0;
+  --zpl-token-number: #d19a66;
+  color-scheme: dark;
 }
 
 :root[data-theme="dark-plus"] {
@@ -56,6 +95,11 @@
   --diag-bg: #1f2f48;
   --diag-border: #46618a;
   --diag-text: #c8dcff;
+  --zpl-token-marker: #5fb0ff;
+  --zpl-token-command: #4ea1ff;
+  --zpl-token-block: #d291ff;
+  --zpl-token-field: #56d4c4;
+  --zpl-token-number: #e0b66f;
   color-scheme: dark;
 }
 
@@ -85,6 +129,11 @@
   --diag-bg: #14334f;
   --diag-border: #3a6a8c;
   --diag-text: #d5ebff;
+  --zpl-token-marker: #78c4ff;
+  --zpl-token-command: #63b8ff;
+  --zpl-token-block: #c6a3ff;
+  --zpl-token-field: #78e0cf;
+  --zpl-token-number: #f0c57a;
   color-scheme: dark;
 }
 
@@ -244,6 +293,19 @@ body {
 .panel-header h2 {
   margin: 0;
   font-size: 19px;
+}
+
+.preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.preview-mode {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 14px;
 }
 
 .editor-panel-header {
@@ -528,27 +590,27 @@ option {
 }
 
 .zpl-token-marker {
-  color: #2563eb;
+  color: var(--zpl-token-marker);
   font-weight: 700;
 }
 
 .zpl-token-command {
-  color: #1d4ed8;
+  color: var(--zpl-token-command);
   font-weight: 600;
 }
 
 .zpl-token-block {
-  color: #7c3aed;
+  color: var(--zpl-token-block);
   font-weight: 700;
 }
 
 .zpl-token-field {
-  color: #0f766e;
+  color: var(--zpl-token-field);
   font-weight: 700;
 }
 
 .zpl-token-number {
-  color: #b45309;
+  color: var(--zpl-token-number);
 }
 
 .label-tiles-panel {
