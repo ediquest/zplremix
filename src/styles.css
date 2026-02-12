@@ -873,6 +873,14 @@ body {
   user-select: none;
 }
 
+.builder-selection-box {
+  position: absolute;
+  border: 1px dashed #2f6ee5;
+  background: rgba(47, 110, 229, 0.12);
+  pointer-events: none;
+  z-index: 999;
+}
+
 .builder-item {
   position: absolute;
   border: 1px solid #223650;
@@ -993,6 +1001,19 @@ body {
 .builder-item-line-v {
   background: #1f2c3f;
   border: none;
+  padding: 0;
+}
+
+.builder-item-line-d {
+  border: none;
+  background:
+    linear-gradient(
+      45deg,
+      transparent calc(50% - 1px),
+      #1f2c3f calc(50% - 1px),
+      #1f2c3f calc(50% + 1px),
+      transparent calc(50% + 1px)
+    );
   padding: 0;
 }
 
@@ -1123,6 +1144,50 @@ body {
   gap: 8px;
 }
 
+.builder-zpl-accordion {
+  border: 1px solid #c5d4eb;
+  border-radius: 10px;
+  background: #f8fbff;
+  overflow: hidden;
+}
+
+.builder-zpl-accordion-toggle {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  padding: 10px 12px;
+  font-size: 15px;
+  font-weight: 700;
+  color: #1f3657;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  text-align: left;
+}
+
+.builder-zpl-accordion-icon {
+  font-size: 18px;
+  color: #395a84;
+  line-height: 1;
+}
+
+.builder-zpl-accordion-body {
+  border-top: 0 solid #d9e4f3;
+  padding: 0 10px;
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition: max-height 240ms ease, opacity 180ms ease, padding 220ms ease, border-top-width 220ms ease;
+}
+
+.builder-zpl-accordion.is-open .builder-zpl-accordion-body {
+  border-top-width: 1px;
+  padding: 10px;
+  max-height: 480px;
+  opacity: 1;
+}
+
 .builder-form-checkbox {
   display: flex;
   align-items: center;
@@ -1149,7 +1214,7 @@ body {
 
 .builder-zpl textarea {
   width: 100%;
-  min-height: 180px;
+  min-height: 340px;
   resize: vertical;
   border: 1px solid #a6bad8;
   border-radius: 8px;

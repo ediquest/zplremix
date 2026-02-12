@@ -2109,6 +2109,97 @@ function drawGraphicBox(
   return { x: pxX, y: pxY, width: pxWidth, height: pxHeight };
 }
 
+function drawGraphicCircle(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  diameter: number,
+  thickness: number,
+  scale: number,
+  reverse: boolean
+): Rect {
+  const pxDiameter = Math.max(1, snapToPixel(diameter * scale));
+  const pxThickness = Math.max(1, snapToPixel(thickness * scale));
+  const pxX = snapToPixel(x);
+  const pxY = snapToPixel(y);
+  if (reverse) {
+    invertRect(ctx, pxX, pxY, pxDiameter, pxDiameter);
+    return { x: pxX, y: pxY, width: pxDiameter, height: pxDiameter };
+  }
+  const radius = Math.max(0.5, pxDiameter / 2);
+  const cx = pxX + radius;
+  const cy = pxY + radius;
+  ctx.beginPath();
+  ctx.arc(cx, cy, Math.max(0.5, radius - pxThickness / 2), 0, Math.PI * 2);
+  ctx.strokeStyle = "#111827";
+  ctx.lineWidth = Math.max(1, Math.min(pxThickness, pxDiameter));
+  ctx.stroke();
+  return { x: pxX, y: pxY, width: pxDiameter, height: pxDiameter };
+}
+
+function drawGraphicEllipse(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  thickness: number,
+  scale: number,
+  reverse: boolean
+): Rect {
+  const pxWidth = Math.max(1, snapToPixel(width * scale));
+  const pxHeight = Math.max(1, snapToPixel(height * scale));
+  const pxThickness = Math.max(1, snapToPixel(thickness * scale));
+  const pxX = snapToPixel(x);
+  const pxY = snapToPixel(y);
+  if (reverse) {
+    invertRect(ctx, pxX, pxY, pxWidth, pxHeight);
+    return { x: pxX, y: pxY, width: pxWidth, height: pxHeight };
+  }
+  const rx = Math.max(0.5, pxWidth / 2 - pxThickness / 2);
+  const ry = Math.max(0.5, pxHeight / 2 - pxThickness / 2);
+  ctx.beginPath();
+  ctx.ellipse(pxX + pxWidth / 2, pxY + pxHeight / 2, rx, ry, 0, 0, Math.PI * 2);
+  ctx.strokeStyle = "#111827";
+  ctx.lineWidth = Math.max(1, Math.min(pxThickness, Math.min(pxWidth, pxHeight)));
+  ctx.stroke();
+  return { x: pxX, y: pxY, width: pxWidth, height: pxHeight };
+}
+
+function drawGraphicDiagonal(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  thickness: number,
+  direction: "L" | "R",
+  scale: number,
+  reverse: boolean
+): Rect {
+  const pxWidth = Math.max(1, snapToPixel(width * scale));
+  const pxHeight = Math.max(1, snapToPixel(height * scale));
+  const pxThickness = Math.max(1, snapToPixel(thickness * scale));
+  const pxX = snapToPixel(x);
+  const pxY = snapToPixel(y);
+  if (reverse) {
+    invertRect(ctx, pxX, pxY, pxWidth, pxHeight);
+    return { x: pxX, y: pxY, width: pxWidth, height: pxHeight };
+  }
+  ctx.beginPath();
+  if (direction === "L") {
+    ctx.moveTo(pxX, pxY);
+    ctx.lineTo(pxX + pxWidth, pxY + pxHeight);
+  } else {
+    ctx.moveTo(pxX, pxY + pxHeight);
+    ctx.lineTo(pxX + pxWidth, pxY);
+  }
+  ctx.strokeStyle = "#111827";
+  ctx.lineWidth = pxThickness;
+  ctx.stroke();
+  return { x: pxX, y: pxY, width: pxWidth, height: pxHeight };
+}
+
 function labelSizeToDots(size: number, unit: "in" | "mm" | "cm", dpi: number): number {
   const safeSize = Math.max(0.1, size);
   if (unit === "cm") {
@@ -2660,6 +2751,82 @@ function drawZplPreview(
         });
       } else if (!rectInside(bounds, printableRect)) {
         addDiagnostic("Graphic box touches non-printable printer margin.", {
+          kind: "data_warning",
+          severity: "warning",
+          impact: "medium"
+        });
+      }
+      return;
+    }
+
+    if (command === "GC") {
+      const diameter = parseNumber(parts[0], 0);
+      const thickness = Math.max(1, parseNumber(parts[1], 1));
+      const point = projectToCanvas(cursorX, cursorY);
+      const bounds = drawGraphicCircle(ctx, point.x, point.y, diameter, thickness, scale, fieldReverse);
+      if (!rectInside(bounds, labelRect)) {
+        addDiagnostic("Graphic circle exceeds label bounds.", {
+          kind: "data_warning",
+          severity: "warning",
+          impact: "high"
+        });
+      } else if (!rectInside(bounds, printableRect)) {
+        addDiagnostic("Graphic circle touches non-printable printer margin.", {
+          kind: "data_warning",
+          severity: "warning",
+          impact: "medium"
+        });
+      }
+      return;
+    }
+
+    if (command === "GE") {
+      const shapeWidth = parseNumber(parts[0], 0);
+      const shapeHeight = parseNumber(parts[1], 0);
+      const thickness = Math.max(1, parseNumber(parts[2], 1));
+      const point = projectToCanvas(cursorX, cursorY);
+      const bounds = drawGraphicEllipse(ctx, point.x, point.y, shapeWidth, shapeHeight, thickness, scale, fieldReverse);
+      if (!rectInside(bounds, labelRect)) {
+        addDiagnostic("Graphic ellipse exceeds label bounds.", {
+          kind: "data_warning",
+          severity: "warning",
+          impact: "high"
+        });
+      } else if (!rectInside(bounds, printableRect)) {
+        addDiagnostic("Graphic ellipse touches non-printable printer margin.", {
+          kind: "data_warning",
+          severity: "warning",
+          impact: "medium"
+        });
+      }
+      return;
+    }
+
+    if (command === "GD") {
+      const shapeWidth = parseNumber(parts[0], 0);
+      const shapeHeight = parseNumber(parts[1], 0);
+      const thickness = Math.max(1, parseNumber(parts[2], 1));
+      const direction = (parts[3] ?? "R").trim().toUpperCase() === "L" ? "L" : "R";
+      const point = projectToCanvas(cursorX, cursorY);
+      const bounds = drawGraphicDiagonal(
+        ctx,
+        point.x,
+        point.y,
+        shapeWidth,
+        shapeHeight,
+        thickness,
+        direction,
+        scale,
+        fieldReverse
+      );
+      if (!rectInside(bounds, labelRect)) {
+        addDiagnostic("Graphic diagonal exceeds label bounds.", {
+          kind: "data_warning",
+          severity: "warning",
+          impact: "high"
+        });
+      } else if (!rectInside(bounds, printableRect)) {
+        addDiagnostic("Graphic diagonal touches non-printable printer margin.", {
           kind: "data_warning",
           severity: "warning",
           impact: "medium"

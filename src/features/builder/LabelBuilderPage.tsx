@@ -18,12 +18,14 @@ type BuilderElementType =
   | "ean13"
   | "line"
   | "line-v"
+  | "line-d"
   | "box"
   | "circle"
   | "ellipse";
 type BarcodeElementType = "code128" | "gs1128" | "itf14" | "code39" | "pdf417" | "qr" | "datamatrix" | "ean13";
 type DragMode = "smooth" | "step";
 type BuilderAccordionKey = "canvas" | "grid" | "elements" | "selected" | "barcodes" | "text" | "separators" | "shapes";
+type BuilderZplAccordionKey = "generated" | "loaded";
 type ZplOrientation = "N" | "R" | "I" | "B";
 type ZplFont = "0" | "A" | "B" | "D" | "E" | "F" | "G" | "H";
 
@@ -48,6 +50,19 @@ type ResizeState = {
   startMouseY: number;
   startWidth: number;
   startHeight: number;
+};
+
+type SelectionBoxState = {
+  startX: number;
+  startY: number;
+  currentX: number;
+  currentY: number;
+};
+
+type DragSnapshot = {
+  id: string;
+  x: number;
+  y: number;
 };
 
 type PrintDensityDpmm = 8 | 12 | 24;
@@ -170,6 +185,9 @@ function createItem(type: BuilderElementType, x: number, y: number, zIndex: numb
   if (type === "line-v") {
     return { id: crypto.randomUUID(), type, x, y, width: 4, height: 220, text: "", filled: false, zIndex, font: "0", orientation: "N" };
   }
+  if (type === "line-d") {
+    return { id: crypto.randomUUID(), type, x, y, width: 220, height: 120, text: "R", filled: false, zIndex, font: "0", orientation: "N" };
+  }
   if (type === "circle") {
     return { id: crypto.randomUUID(), type, x, y, width: 120, height: 120, text: "", filled: false, zIndex, font: "0", orientation: "N" };
   }
@@ -188,6 +206,79 @@ function snapToStep(value: number, step: number): number {
     return value;
   }
   return Math.round(value / step) * step;
+}
+
+function normalizeOrientation(value: string | undefined): ZplOrientation {
+  const orientation = (value ?? "N").toUpperCase();
+  return orientation === "R" || orientation === "I" || orientation === "B" ? orientation : "N";
+}
+
+function orientationToDeg(orientation: ZplOrientation): number {
+  if (orientation === "R") {
+    return 90;
+  }
+  if (orientation === "I") {
+    return 180;
+  }
+  if (orientation === "B") {
+    return 270;
+  }
+  return 0;
+}
+
+function parseLabelBoundsFromZpl(zpl: string): { width: number; height: number } {
+  const pw = /\^PW(\d+)/i.exec(zpl);
+  const ll = /\^LL(\d+)/i.exec(zpl);
+  const width = Math.max(100, Number(pw?.[1] ?? 812));
+  const height = Math.max(100, Number(ll?.[1] ?? 1218));
+  return { width, height };
+}
+
+function getLastOrientationFromFw(segment: string): ZplOrientation {
+  const regex = /\^FW([NRIB])/gi;
+  let match: RegExpExecArray | null;
+  let orientation: ZplOrientation = "N";
+  while ((match = regex.exec(segment)) !== null) {
+    orientation = normalizeOrientation(match[1]);
+  }
+  return orientation;
+}
+
+function getFieldOrientationFromFormat(zpl: string, fieldStartIndex: number, body: string): ZplOrientation {
+  const before = zpl.slice(0, Math.max(0, fieldStartIndex));
+  const fromBefore = getLastOrientationFromFw(before);
+  const fromBody = getLastOrientationFromFw(body);
+  return fromBody !== "N" ? fromBody : fromBefore;
+}
+
+function mapFieldPosition(
+  command: "FO" | "FT",
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  orientation: ZplOrientation,
+  labelWidth: number,
+  labelHeight: number
+): { x: number; y: number } {
+  const baseX = x;
+  const baseY = command === "FT" ? y - height : y;
+  let mappedX = baseX;
+  let mappedY = baseY;
+  if (orientation === "R") {
+    mappedX = baseY;
+    mappedY = labelHeight - baseX - height;
+  } else if (orientation === "I") {
+    mappedX = labelWidth - baseX - width;
+    mappedY = labelHeight - baseY - height;
+  } else if (orientation === "B") {
+    mappedX = labelWidth - baseY - width;
+    mappedY = baseX;
+  }
+  return {
+    x: clamp(mappedX, 0, Math.max(0, labelWidth - Math.max(1, width))),
+    y: clamp(mappedY, 0, Math.max(0, labelHeight - Math.max(1, height)))
+  };
 }
 
 function softSnapToStep(value: number, step: number, threshold: number): number {
@@ -246,48 +337,48 @@ function buildZplFromItems(items: BuilderItem[], canvasWidth: number, canvasHeig
     }
     if (item.type === "code128") {
       const barHeight = Math.max(40, Math.round(item.height));
-      lines.push(`^FO${x},${y}^BY2,2,${barHeight}^BCN,${barHeight},Y,N,N^FD${item.text}^FS`);
+      lines.push(`^FO${x},${y}^BY2,2,${barHeight}^BC${item.orientation},${barHeight},Y,N,N^FD${item.text}^FS`);
       return;
     }
     if (item.type === "gs1128") {
       const barHeight = Math.max(40, Math.round(item.height));
       const payload = item.text.startsWith(">8") ? item.text : `>8${item.text}`;
-      lines.push(`^FO${x},${y}^BY2,2,${barHeight}^BCN,${barHeight},Y,N,N^FD${payload}^FS`);
+      lines.push(`^FO${x},${y}^BY2,2,${barHeight}^BC${item.orientation},${barHeight},Y,N,N^FD${payload}^FS`);
       return;
     }
     if (item.type === "itf14") {
       const barHeight = Math.max(40, Math.round(item.height));
       const digits = item.text.replace(/\D/g, "").slice(0, 14) || "01234567890123";
-      lines.push(`^FO${x},${y}^BY2,2,${barHeight}^B2N,${barHeight},Y,N,N^FD${digits}^FS`);
+      lines.push(`^FO${x},${y}^BY2,2,${barHeight}^B2${item.orientation},${barHeight},Y,N,N^FD${digits}^FS`);
       return;
     }
     if (item.type === "code39") {
       const barHeight = Math.max(40, Math.round(item.height));
-      lines.push(`^FO${x},${y}^BY2,2,${barHeight}^B3N,N,${barHeight},Y,N^FD${item.text}^FS`);
+      lines.push(`^FO${x},${y}^BY2,2,${barHeight}^B3${item.orientation},N,${barHeight},Y,N^FD${item.text}^FS`);
       return;
     }
     if (item.type === "pdf417") {
       const rows = clamp(Math.round(item.height / 16), 3, 30);
       const colWidth = clamp(Math.round(item.width / 42), 2, 30);
-      lines.push(`^FO${x},${y}^B7N,${Math.max(2, colWidth)},${rows},4,16,N^FD${item.text}^FS`);
+      lines.push(`^FO${x},${y}^B7${item.orientation},${Math.max(2, colWidth)},${rows},4,16,N^FD${item.text}^FS`);
       return;
     }
     if (item.type === "qr") {
       const moduleSize = clamp(Math.round(Math.min(item.width, item.height) / 28), 2, 10);
       const qx = Math.max(0, x - QR_COMPAT_OFFSET_X);
       const qy = Math.max(0, y - QR_COMPAT_OFFSET_Y);
-      lines.push(`^FO${qx},${qy}^BQN,2,${moduleSize}^FDLA,${item.text}^FS`);
+      lines.push(`^FO${qx},${qy}^BQ${item.orientation},2,${moduleSize}^FDLA,${item.text}^FS`);
       return;
     }
     if (item.type === "datamatrix") {
       const moduleSize = clamp(Math.round(Math.min(item.width, item.height) / 24), 3, 12);
-      lines.push(`^FO${x},${y}^BXN,${moduleSize},200^FD${item.text}^FS`);
+      lines.push(`^FO${x},${y}^BX${item.orientation},${moduleSize},200^FD${item.text}^FS`);
       return;
     }
     if (item.type === "ean13") {
       const barHeight = Math.max(40, Math.round(item.height));
       const digits = item.text.replace(/\D/g, "").slice(0, 13) || "5901234123457";
-      lines.push(`^FO${x},${y}^BY2,2,${barHeight}^BEN,${barHeight},Y,N^FD${digits}^FS`);
+      lines.push(`^FO${x},${y}^BY2,2,${barHeight}^BE${item.orientation},${barHeight},Y,N^FD${digits}^FS`);
       return;
     }
     if (item.type === "line") {
@@ -296,6 +387,11 @@ function buildZplFromItems(items: BuilderItem[], canvasWidth: number, canvasHeig
     }
     if (item.type === "line-v") {
       lines.push(`^FO${x},${y}^GB${Math.max(1, Math.round(item.width))},${Math.round(item.height)},1^FS`);
+      return;
+    }
+    if (item.type === "line-d") {
+      const direction = (item.text ?? "").trim().toUpperCase() === "L" ? "L" : "R";
+      lines.push(`^FO${x},${y}^GD${Math.max(1, Math.round(item.width))},${Math.max(1, Math.round(item.height))},1,${direction}^FS`);
       return;
     }
     if (item.type === "circle") {
@@ -322,15 +418,17 @@ function buildZplFromItems(items: BuilderItem[], canvasWidth: number, canvasHeig
 
 function parseItemsFromZpl(zpl: string): BuilderItem[] {
   const items: BuilderItem[] = [];
-  const fieldRegex = /(?:\^FO|\^FT)(-?\d+),(-?\d+)([\s\S]*?)\^FS/g;
+  const fieldRegex = /\^(FO|FT)(-?\d+),(-?\d+)([\s\S]*?)\^FS/g;
   let match: RegExpExecArray | null;
   while ((match = fieldRegex.exec(zpl)) !== null) {
-    const x = Number(match[1]);
-    const y = Number(match[2]);
-    const body = match[3] ?? "";
-    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    const command = (match[1] === "FT" ? "FT" : "FO") as "FO" | "FT";
+    const rawX = Number(match[2]);
+    const rawY = Number(match[3]);
+    const body = match[4] ?? "";
+    if (!Number.isFinite(rawX) || !Number.isFinite(rawY)) {
       continue;
     }
+    const fieldOrientation = getFieldOrientationFromFormat(zpl, match.index, body);
 
     const gb = /\^GB(\d+),(\d+)(?:,(\d+))?/i.exec(body);
     if (gb) {
@@ -341,8 +439,8 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
       items.push({
         id: crypto.randomUUID(),
         type: height <= 6 || width <= 6 || border <= 1 ? (height >= width ? "line-v" : "line") : "box",
-        x,
-        y,
+        x: rawX,
+        y: rawY,
         width,
         height,
         text: "",
@@ -361,8 +459,8 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
       items.push({
         id: crypto.randomUUID(),
         type: "circle",
-        x,
-        y,
+        x: rawX,
+        y: rawY,
         width: diameter,
         height: diameter,
         text: "",
@@ -382,8 +480,8 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
       items.push({
         id: crypto.randomUUID(),
         type: "ellipse",
-        x,
-        y,
+        x: rawX,
+        y: rawY,
         width,
         height,
         text: "",
@@ -395,144 +493,175 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
       continue;
     }
 
-    if (/\^BQN/i.test(body)) {
+    const gd = /\^GD(\d+),(\d+)(?:,(\d+))?(?:,([LR]))?/i.exec(body);
+    if (gd) {
+      const width = Math.max(8, Number(gd[1]));
+      const height = Math.max(8, Number(gd[2]));
+      const direction = (gd[4] ?? "R").toUpperCase() === "L" ? "L" : "R";
+      items.push({
+        id: crypto.randomUUID(),
+        type: "line-d",
+        x: rawX,
+        y: rawY,
+        width,
+        height,
+        text: direction,
+        filled: false,
+        zIndex: items.length,
+        font: "0",
+        orientation: "N"
+      });
+      continue;
+    }
+
+    if (/\^BQ/i.test(body)) {
       const fd = /\^FD(?:[A-Z]{1,2},)?([^\\^]*)/i.exec(body);
       const payload = fd?.[1] ?? "https://zplremix.local";
-      const bqn = /\^BQN(?:,[12])?(?:,(\d+))?/i.exec(body);
-      const magnification = clamp(Number(bqn?.[1] ?? 3), 1, 12);
+      const bqn = /\^BQ([NRIB])?(?:,[12])?(?:,(\d+))?/i.exec(body);
+      const orientation = normalizeOrientation(bqn?.[1]);
+      const magnification = clamp(Number(bqn?.[2] ?? 3), 1, 12);
       const qrSize = estimateQrBoxSize(payload, magnification);
       items.push({
         id: crypto.randomUUID(),
         type: "qr",
-        x: x + QR_COMPAT_OFFSET_X,
-        y: y + QR_COMPAT_OFFSET_Y,
+        x: rawX + QR_COMPAT_OFFSET_X,
+        y: rawY + QR_COMPAT_OFFSET_Y,
         width: qrSize.width,
         height: qrSize.height,
         text: payload,
         filled: false,
         zIndex: items.length,
         font: "0",
-        orientation: "N"
+        orientation
       });
       continue;
     }
 
     if (/\^BX/i.test(body)) {
       const fd = /\^FD([^\\^]*)/i.exec(body);
+      const bx = /\^BX([NRIB])?/i.exec(body);
+      const orientation = normalizeOrientation(bx?.[1] ?? fieldOrientation);
       items.push({
         id: crypto.randomUUID(),
         type: "datamatrix",
-        x,
-        y,
+        x: rawX,
+        y: rawY,
         width: 120,
         height: 120,
         text: fd?.[1] ?? "DMX-123456",
         filled: false,
         zIndex: items.length,
         font: "0",
-        orientation: "N"
+        orientation
       });
       continue;
     }
 
     if (/\^BE/i.test(body)) {
       const fd = /\^FD([^\\^]*)/i.exec(body);
-      const be = /\^BE[^,]*,(\d+)/i.exec(body);
-      const barHeight = Math.max(40, Number(be?.[1] ?? 100));
+      const be = /\^BE([NRIB])?,(\d+)/i.exec(body);
+      const barHeight = Math.max(40, Number(be?.[2] ?? 100));
+      const orientation = normalizeOrientation(be?.[1] ?? fieldOrientation);
       items.push({
         id: crypto.randomUUID(),
         type: "ean13",
-        x,
-        y,
+        x: rawX,
+        y: rawY,
         width: 260,
         height: barHeight,
         text: fd?.[1] ?? "5901234123457",
         filled: false,
         zIndex: items.length,
         font: "0",
-        orientation: "N"
+        orientation
       });
       continue;
     }
 
     if (/\^B7/i.test(body)) {
       const fd = /\^FD([^\\^]*)/i.exec(body);
-      const b7 = /\^B7[^,]*,(\d+),(\d+)/i.exec(body);
-      const colWidth = Number(b7?.[1] ?? 4);
-      const rows = Number(b7?.[2] ?? 6);
+      const b7 = /\^B7([NRIB])?,(\d+),(\d+)/i.exec(body);
+      const colWidth = Number(b7?.[2] ?? 4);
+      const rows = Number(b7?.[3] ?? 6);
+      const width = Math.max(160, colWidth * 42);
+      const height = Math.max(64, rows * 16);
+      const orientation = normalizeOrientation(b7?.[1] ?? fieldOrientation);
       items.push({
         id: crypto.randomUUID(),
         type: "pdf417",
-        x,
-        y,
-        width: Math.max(160, colWidth * 42),
-        height: Math.max(64, rows * 16),
+        x: rawX,
+        y: rawY,
+        width,
+        height,
         text: fd?.[1] ?? "PDF417 SAMPLE DATA",
         filled: false,
         zIndex: items.length,
         font: "0",
-        orientation: "N"
+        orientation
       });
       continue;
     }
 
     if (/\^B2/i.test(body)) {
       const fd = /\^FD([^\\^]*)/i.exec(body);
-      const b2 = /\^B2[^,]*,(\d+)/i.exec(body);
-      const barHeight = Math.max(40, Number(b2?.[1] ?? 100));
+      const b2 = /\^B2([NRIB])?,(\d+)/i.exec(body);
+      const barHeight = Math.max(40, Number(b2?.[2] ?? 100));
+      const orientation = normalizeOrientation(b2?.[1] ?? fieldOrientation);
       items.push({
         id: crypto.randomUUID(),
         type: "itf14",
-        x,
-        y,
+        x: rawX,
+        y: rawY,
         width: 280,
         height: barHeight,
         text: fd?.[1] ?? "01234567890123",
         filled: false,
         zIndex: items.length,
         font: "0",
-        orientation: "N"
+        orientation
       });
       continue;
     }
 
     if (/\^B3/i.test(body)) {
       const fd = /\^FD([^\\^]*)/i.exec(body);
-      const b3 = /\^B3[^,]*,[^,]*,(\d+)/i.exec(body);
-      const barHeight = Math.max(40, Number(b3?.[1] ?? 100));
+      const b3 = /\^B3([NRIB])?,[^,]*,(\d+)/i.exec(body);
+      const barHeight = Math.max(40, Number(b3?.[2] ?? 100));
+      const orientation = normalizeOrientation(b3?.[1] ?? fieldOrientation);
       items.push({
         id: crypto.randomUUID(),
         type: "code39",
-        x,
-        y,
+        x: rawX,
+        y: rawY,
         width: 280,
         height: barHeight,
         text: fd?.[1] ?? "CODE39-123",
         filled: false,
         zIndex: items.length,
         font: "0",
-        orientation: "N"
+        orientation
       });
       continue;
     }
 
     if (/\^BC/i.test(body)) {
       const fd = /\^FD([^\\^]*)/i.exec(body);
-      const bc = /\^BC[^,]*,(\d+)/i.exec(body);
-      const barHeight = Math.max(40, Number(bc?.[1] ?? 100));
+      const bc = /\^BC([NRIB])?,(\d+)/i.exec(body);
+      const barHeight = Math.max(40, Number(bc?.[2] ?? 100));
       const payload = fd?.[1] ?? "1234567890";
+      const orientation = normalizeOrientation(bc?.[1] ?? fieldOrientation);
       items.push({
         id: crypto.randomUUID(),
         type: payload.startsWith(">8") ? "gs1128" : "code128",
-        x,
-        y,
+        x: rawX,
+        y: rawY,
         width: 280,
         height: barHeight,
         text: payload,
         filled: false,
         zIndex: items.length,
         font: "0",
-        orientation: "N"
+        orientation
       });
       continue;
     }
@@ -541,21 +670,23 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
     if (fd) {
       const a = /\^A([A-Z0-9])([NRIB])?,?(-?\d*)?,?(-?\d*)?/i.exec(body);
       const font = ((a?.[1] ?? "0").toUpperCase() as ZplFont);
-      const orientation = ((a?.[2] ?? "N").toUpperCase() as ZplOrientation);
+      const orientation = normalizeOrientation(a?.[2] ?? fieldOrientation);
       const h = Number(a?.[3] || 32);
       const width = estimateTextBoxWidth(fd[1], h);
+      const height = Math.max(24, Math.round(h * 1.2));
+      const y = command === "FT" ? rawY - height : rawY;
       items.push({
         id: crypto.randomUUID(),
         type: "text",
-        x,
+        x: rawX,
         y,
         width,
-        height: Math.max(24, Math.round(h * 1.2)),
+        height,
         text: fd[1],
         filled: false,
         zIndex: items.length,
         font: ["0", "A", "B", "D", "E", "F", "G", "H"].includes(font) ? font : "0",
-        orientation: ["N", "R", "I", "B"].includes(orientation) ? orientation : "N"
+        orientation
       });
     }
   }
@@ -622,6 +753,7 @@ function estimateQrBoxSize(text: string, magnification: number): { width: number
 
 function BuilderBarcodePreview({ item }: { item: BuilderItem }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const rotation = orientationToDeg(item.orientation);
 
   useEffect(() => {
     if (!canvasRef.current || !isBarcodeElementType(item.type)) {
@@ -694,7 +826,13 @@ function BuilderBarcodePreview({ item }: { item: BuilderItem }) {
     }
   }, [item]);
 
-  return <canvas ref={canvasRef} className="builder-item-barcode-canvas" />;
+  return (
+    <canvas
+      ref={canvasRef}
+      className="builder-item-barcode-canvas"
+      style={rotation ? { transform: `rotate(${rotation}deg)`, transformOrigin: "50% 50%" } : undefined}
+    />
+  );
 }
 
 function getMinSizeForType(type: BuilderElementType): { width: number; height: number } {
@@ -703,6 +841,9 @@ function getMinSizeForType(type: BuilderElementType): { width: number; height: n
   }
   if (type === "line-v") {
     return { width: 1, height: 16 };
+  }
+  if (type === "line-d") {
+    return { width: 16, height: 16 };
   }
   if (type === "circle") {
     return { width: 12, height: 12 };
@@ -754,9 +895,12 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
   const [snapToGridEnabled, setSnapToGridEnabled] = useState(true);
   const [snapToItemsEnabled, setSnapToItemsEnabled] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [resizing, setResizing] = useState<ResizeState | null>(null);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+  const [dragSnapshot, setDragSnapshot] = useState<DragSnapshot[]>([]);
+  const [selectionBox, setSelectionBox] = useState<SelectionBoxState | null>(null);
   const [accordionOpen, setAccordionOpen] = useState<Record<BuilderAccordionKey, boolean>>({
     canvas: false,
     grid: false,
@@ -767,6 +911,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     separators: false,
     shapes: false
   });
+  const [zplAccordionOpen, setZplAccordionOpen] = useState<BuilderZplAccordionKey>("generated");
   const canvasRef = useRef<HTMLDivElement>(null);
 
   const canvasWidth = useMemo(() => {
@@ -783,7 +928,12 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     return clamp(autoFit, 0.28, 1);
   }, [canvasWidth, canvasHeight]);
 
-  const selectedItem = useMemo(() => items.find((item) => item.id === selectedId) ?? null, [items, selectedId]);
+  const selectedItem = useMemo(() => {
+    if (selectedIds.length !== 1) {
+      return null;
+    }
+    return items.find((item) => item.id === selectedIds[0]) ?? null;
+  }, [items, selectedIds]);
   const generatedZpl = useMemo(() => buildZplFromItems(items, canvasWidth, canvasHeight), [items, canvasWidth, canvasHeight]);
   const sizeRange =
     canvasSettings.labelUnit === "in"
@@ -805,6 +955,14 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
   };
   const toggleAccordion = (key: BuilderAccordionKey) => {
     setAccordionOpen((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+  const openZplAccordion = (key: BuilderZplAccordionKey) => {
+    setZplAccordionOpen(key);
+  };
+
+  const selectSingle = (id: string | null) => {
+    setSelectedId(id);
+    setSelectedIds(id ? [id] : []);
   };
 
   const resolveDragPosition = (
@@ -861,8 +1019,11 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
 
   useEffect(() => {
     setItems(parseItemsFromZpl(seedZpl));
+    setSelectedIds([]);
     setSelectedId(null);
     setDraggingId(null);
+    setDragSnapshot([]);
+    setSelectionBox(null);
     setIsDirty(false);
   }, [seedZpl]);
 
@@ -874,7 +1035,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
   }, [selectedItem]);
 
   useEffect(() => {
-    if (!draggingId && !resizing) {
+    if (!draggingId && !resizing && !selectionBox) {
       return;
     }
     const handleMouseMove = (event: globalThis.MouseEvent) => {
@@ -889,7 +1050,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [draggingId, resizing, viewScale, safeGridSize, safeDragStep, snapToGridEnabled, snapToItemsEnabled, dragMode]);
+  }, [draggingId, resizing, selectionBox, items, viewScale, safeGridSize, safeDragStep, snapToGridEnabled, snapToItemsEnabled, dragMode]);
 
   useEffect(() => {
     try {
@@ -931,20 +1092,74 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     draft.x = pos.x;
     draft.y = pos.y;
     setItems((prev) => [...prev, draft]);
-    setSelectedId(draft.id);
+    selectSingle(draft.id);
     setIsDirty(true);
+  };
+
+  const onCanvasMouseDown = (e: MouseEvent<HTMLDivElement>) => {
+    if (!canvasRef.current || e.target !== e.currentTarget) {
+      return;
+    }
+    const rect = canvasRef.current.getBoundingClientRect();
+    const x = clamp((e.clientX - rect.left) / viewScale, 0, canvasWidth);
+    const y = clamp((e.clientY - rect.top) / viewScale, 0, canvasHeight);
+    setDraggingId(null);
+    setResizing(null);
+    setDragSnapshot([]);
+    setSelectionBox({ startX: x, startY: y, currentX: x, currentY: y });
+    selectSingle(null);
   };
 
   const onItemMouseDown = (e: MouseEvent, item: BuilderItem) => {
     if (!canvasRef.current) {
       return;
     }
+    if (e.ctrlKey || e.metaKey) {
+      setSelectedIds((prev) => {
+        const exists = prev.includes(item.id);
+        const next = exists ? prev.filter((id) => id !== item.id) : [...prev, item.id];
+        setSelectedId(next.length === 1 ? next[0] : null);
+        return next;
+      });
+      setDraggingId(null);
+      setDragSnapshot([]);
+      return;
+    }
     const rect = canvasRef.current.getBoundingClientRect();
     const x = (e.clientX - rect.left) / viewScale;
     const y = (e.clientY - rect.top) / viewScale;
-    setSelectedId(item.id);
+    const movingIds = selectedIds.includes(item.id) && selectedIds.length > 1 ? selectedIds : [item.id];
+    if (e.altKey) {
+      const sources = items.filter((entry) => movingIds.includes(entry.id));
+      if (!sources.length) {
+        return;
+      }
+      const maxZ = items.length ? Math.max(...items.map((entry) => entry.zIndex)) : 0;
+      const idMap = new Map<string, string>();
+      sources.forEach((source) => idMap.set(source.id, crypto.randomUUID()));
+      const clones = sources.map((source, index) => ({
+        ...source,
+        id: idMap.get(source.id) ?? crypto.randomUUID(),
+        zIndex: maxZ + index + 1
+      }));
+      const anchorCloneId = idMap.get(item.id) ?? clones[0].id;
+      setItems((prev) => [...prev, ...clones]);
+      setSelectedIds(clones.map((clone) => clone.id));
+      setSelectedId(anchorCloneId);
+      setDraggingId(anchorCloneId);
+      setDragOffset({ x: x - item.x, y: y - item.y });
+      setDragSnapshot(clones.map((clone) => ({ id: clone.id, x: clone.x, y: clone.y })));
+      setIsDirty(true);
+      return;
+    }
+    if (!selectedIds.includes(item.id)) {
+      selectSingle(item.id);
+    } else {
+      setSelectedId(item.id);
+    }
     setDraggingId(item.id);
     setDragOffset({ x: x - item.x, y: y - item.y });
+    setDragSnapshot(items.filter((entry) => movingIds.includes(entry.id)).map((entry) => ({ id: entry.id, x: entry.x, y: entry.y })));
   };
 
   const onResizeHandleMouseDown = (e: MouseEvent, item: BuilderItem, axis: "right" | "bottom" | "corner") => {
@@ -956,7 +1171,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     const rect = canvasRef.current.getBoundingClientRect();
     const x = (e.clientX - rect.left) / viewScale;
     const y = (e.clientY - rect.top) / viewScale;
-    setSelectedId(item.id);
+    selectSingle(item.id);
     setDraggingId(null);
     setResizing({
       id: item.id,
@@ -1010,12 +1225,54 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
       setIsDirty(true);
       return;
     }
+    if (selectionBox) {
+      const rect = canvasRef.current.getBoundingClientRect();
+      const x = clamp((clientX - rect.left) / viewScale, 0, canvasWidth);
+      const y = clamp((clientY - rect.top) / viewScale, 0, canvasHeight);
+      setSelectionBox((prev) => (prev ? { ...prev, currentX: x, currentY: y } : prev));
+      return;
+    }
     if (!draggingId) {
       return;
     }
     const rect = canvasRef.current.getBoundingClientRect();
     const x = (clientX - rect.left) / viewScale;
     const y = (clientY - rect.top) / viewScale;
+    if (dragSnapshot.length > 1) {
+      const anchorStart = dragSnapshot.find((entry) => entry.id === draggingId);
+      if (!anchorStart) {
+        return;
+      }
+      setItems((prev) => {
+        const anchorCurrent = prev.find((entry) => entry.id === draggingId);
+        if (!anchorCurrent) {
+          return prev;
+        }
+        const anchorPos = resolveDragPosition(x - dragOffset.x, y - dragOffset.y, anchorCurrent, prev);
+        const deltaX = anchorPos.x - anchorStart.x;
+        const deltaY = anchorPos.y - anchorStart.y;
+        const idSet = new Set(dragSnapshot.map((entry) => entry.id));
+        const startById = new Map(dragSnapshot.map((entry) => [entry.id, entry] as const));
+        return prev.map((entry) => {
+          if (!idSet.has(entry.id)) {
+            return entry;
+          }
+          const start = startById.get(entry.id);
+          if (!start) {
+            return entry;
+          }
+          const maxX = canvasWidth - Math.max(12, entry.width);
+          const maxY = canvasHeight - Math.max(12, entry.height);
+          return {
+            ...entry,
+            x: clamp(start.x + deltaX, 0, maxX),
+            y: clamp(start.y + deltaY, 0, maxY)
+          };
+        });
+      });
+      setIsDirty(true);
+      return;
+    }
     setItems((prev) =>
       prev.map((item) => {
         if (item.id !== draggingId) {
@@ -1037,8 +1294,21 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
   };
 
   const stopDrag = () => {
+    if (selectionBox) {
+      const minX = Math.min(selectionBox.startX, selectionBox.currentX);
+      const minY = Math.min(selectionBox.startY, selectionBox.currentY);
+      const maxX = Math.max(selectionBox.startX, selectionBox.currentX);
+      const maxY = Math.max(selectionBox.startY, selectionBox.currentY);
+      const selected = items
+        .filter((item) => item.x < maxX && item.x + item.width > minX && item.y < maxY && item.y + item.height > minY)
+        .map((item) => item.id);
+      setSelectedIds(selected);
+      setSelectedId(selected.length === 1 ? selected[0] : null);
+      setSelectionBox(null);
+    }
     setDraggingId(null);
     setResizing(null);
+    setDragSnapshot([]);
   };
 
   const updateSelected = (patch: Partial<BuilderItem>) => {
@@ -1071,19 +1341,24 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
   };
 
   const removeSelected = () => {
-    if (!selectedId) {
+    if (!selectedIds.length) {
       return;
     }
-    setItems((prev) => prev.filter((item) => item.id !== selectedId));
+    const selectedSet = new Set(selectedIds);
+    setItems((prev) => prev.filter((item) => !selectedSet.has(item.id)));
+    setSelectedIds([]);
     setSelectedId(null);
     setIsDirty(true);
   };
 
   const resetToNewLabel = () => {
     setItems([]);
+    setSelectedIds([]);
     setSelectedId(null);
     setDraggingId(null);
     setResizing(null);
+    setSelectionBox(null);
+    setDragSnapshot([]);
     setIsDirty(true);
   };
 
@@ -1097,7 +1372,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Delete" || !selectedId) {
+      if (!selectedIds.length) {
         return;
       }
       const target = event.target as HTMLElement | null;
@@ -1105,14 +1380,53 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target?.isContentEditable) {
         return;
       }
+      if (event.key === "Delete") {
+        event.preventDefault();
+        const selectedSet = new Set(selectedIds);
+        setItems((prev) => prev.filter((item) => !selectedSet.has(item.id)));
+        setSelectedIds([]);
+        setSelectedId(null);
+        setIsDirty(true);
+        return;
+      }
+      if (draggingId || resizing) {
+        return;
+      }
+      const delta = event.shiftKey ? 10 : 1;
+      let dx = 0;
+      let dy = 0;
+      if (event.key === "ArrowLeft") {
+        dx = -delta;
+      } else if (event.key === "ArrowRight") {
+        dx = delta;
+      } else if (event.key === "ArrowUp") {
+        dy = -delta;
+      } else if (event.key === "ArrowDown") {
+        dy = delta;
+      } else {
+        return;
+      }
       event.preventDefault();
-      setItems((prev) => prev.filter((item) => item.id !== selectedId));
-      setSelectedId(null);
+      const selectedSet = new Set(selectedIds);
+      setItems((prev) =>
+        prev.map((item) => {
+          if (!selectedSet.has(item.id)) {
+            return item;
+          }
+          const maxX = canvasWidth - Math.max(12, item.width);
+          const maxY = canvasHeight - Math.max(12, item.height);
+          return {
+            ...item,
+            x: clamp(item.x + dx, 0, maxX),
+            y: clamp(item.y + dy, 0, maxY)
+          };
+        })
+      );
       setIsDirty(true);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectedId]);
+  }, [selectedIds, draggingId, resizing, canvasWidth, canvasHeight]);
 
   return (
     <main className="app-shell builder-shell">
@@ -1381,6 +1695,9 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                     <button type="button" draggable onDragStart={(e) => onPaletteDragStart(e, "line-v")}>
                       Vertical Line
                     </button>
+                    <button type="button" draggable onDragStart={(e) => onPaletteDragStart(e, "line-d")}>
+                      Diagonal Line
+                    </button>
                   </div>
                 </section>
                 <section className={`builder-sub-accordion${accordionOpen.shapes ? " is-open" : ""}`}>
@@ -1496,7 +1813,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                       </select>
                     </label>
                   )}
-                  {selectedItem.type === "text" && (
+                  {(selectedItem.type === "text" || isBarcodeElementType(selectedItem.type)) && (
                     <label>
                       Orientation
                       <select
@@ -1507,6 +1824,18 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                         <option value="R">R (90)</option>
                         <option value="I">I (180)</option>
                         <option value="B">B (270)</option>
+                      </select>
+                    </label>
+                  )}
+                  {selectedItem.type === "line-d" && (
+                    <label>
+                      Direction
+                      <select
+                        value={(selectedItem.text ?? "R").toUpperCase() === "L" ? "L" : "R"}
+                        onChange={(e) => updateSelected({ text: e.target.value === "L" ? "L" : "R" })}
+                      >
+                        <option value="R">R (up-right)</option>
+                        <option value="L">L (down-right)</option>
                       </select>
                     </label>
                   )}
@@ -1528,6 +1857,8 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                     Delete Element
                   </button>
                 </div>
+              ) : selectedIds.length > 1 ? (
+                <p className="muted">{selectedIds.length} elements selected. Drag, use arrows, or press Delete.</p>
               ) : (
                 <p className="muted">Click an element on canvas to edit.</p>
               )}
@@ -1551,19 +1882,39 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
             }}
             onDragOver={(e) => e.preventDefault()}
             onDrop={onCanvasDrop}
+            onMouseDown={onCanvasMouseDown}
             onMouseMove={onCanvasMouseMove}
             onMouseUp={stopDrag}
           >
+            {selectionBox && (
+              <div
+                className="builder-selection-box"
+                style={{
+                  left: `${Math.min(selectionBox.startX, selectionBox.currentX) * viewScale}px`,
+                  top: `${Math.min(selectionBox.startY, selectionBox.currentY) * viewScale}px`,
+                  width: `${Math.abs(selectionBox.currentX - selectionBox.startX) * viewScale}px`,
+                  height: `${Math.abs(selectionBox.currentY - selectionBox.startY) * viewScale}px`
+                }}
+              />
+            )}
             {[...items].sort((a, b) => a.zIndex - b.zIndex).map((item) => (
               <div
                 key={item.id}
-                className={`builder-item builder-item-${item.type}${selectedId === item.id ? " is-selected" : ""}${item.filled ? " is-filled" : ""}`}
+                className={`builder-item builder-item-${item.type}${selectedIds.includes(item.id) ? " is-selected" : ""}${item.filled ? " is-filled" : ""}`}
                 style={{
                   left: `${item.x * viewScale}px`,
                   top: `${item.y * viewScale}px`,
                   width: `${Math.max(6, item.width) * viewScale}px`,
                   height: `${Math.max(6, item.height) * viewScale}px`,
-                  zIndex: item.zIndex + 1
+                  zIndex: item.zIndex + 1,
+                  ...(item.type === "line-d"
+                    ? {
+                        backgroundImage:
+                          (item.text ?? "R").toUpperCase() === "L"
+                            ? "linear-gradient(135deg, transparent calc(50% - 1px), #1f2c3f calc(50% - 1px), #1f2c3f calc(50% + 1px), transparent calc(50% + 1px))"
+                            : "linear-gradient(45deg, transparent calc(50% - 1px), #1f2c3f calc(50% - 1px), #1f2c3f calc(50% + 1px), transparent calc(50% + 1px))"
+                      }
+                    : {})
                 }}
                 onMouseDown={(e) => onItemMouseDown(e, item)}
               >
@@ -1595,10 +1946,34 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
         </section>
 
         <aside className="builder-zpl">
-          <h2>Generated ZPL</h2>
-          <textarea value={generatedZpl} readOnly />
-          <h3>Loaded Source ZPL</h3>
-          <textarea value={seedZpl} readOnly />
+          <section className={`builder-zpl-accordion${zplAccordionOpen === "generated" ? " is-open" : ""}`}>
+            <button
+              type="button"
+              className="builder-zpl-accordion-toggle"
+              onClick={() => openZplAccordion("generated")}
+              aria-expanded={zplAccordionOpen === "generated"}
+            >
+              <span>Generated ZPL</span>
+              <span className="builder-zpl-accordion-icon" aria-hidden>{zplAccordionOpen === "generated" ? "-" : "+"}</span>
+            </button>
+            <div className="builder-zpl-accordion-body">
+              <textarea value={generatedZpl} readOnly />
+            </div>
+          </section>
+          <section className={`builder-zpl-accordion${zplAccordionOpen === "loaded" ? " is-open" : ""}`}>
+            <button
+              type="button"
+              className="builder-zpl-accordion-toggle"
+              onClick={() => openZplAccordion("loaded")}
+              aria-expanded={zplAccordionOpen === "loaded"}
+            >
+              <span>Loaded Source ZPL</span>
+              <span className="builder-zpl-accordion-icon" aria-hidden>{zplAccordionOpen === "loaded" ? "-" : "+"}</span>
+            </button>
+            <div className="builder-zpl-accordion-body">
+              <textarea value={seedZpl} readOnly />
+            </div>
+          </section>
           <button type="button" className="download-btn" onClick={() => onBack(seedZpl)}>
             Use Source ZPL And Back
           </button>
