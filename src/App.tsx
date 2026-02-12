@@ -108,6 +108,7 @@ export default function App() {
   const [debouncedInput, setDebouncedInput] = useState<string>(rawInput);
   const [zipLabels, setZipLabels] = useState<LabelCandidate[]>([]);
   const [selectedLabelId, setSelectedLabelId] = useState<string | null>(null);
+  const [selectedLabelZplKey, setSelectedLabelZplKey] = useState<string>("");
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedInput(rawInput), DEBOUNCE_MS);
@@ -179,22 +180,32 @@ export default function App() {
   useEffect(() => {
     if (!availableLabels.length) {
       setSelectedLabelId(null);
+      setSelectedLabelZplKey("");
       return;
     }
-    if (
-      !selectedLabelId ||
-      !availableLabels.some((item) => item.id === selectedLabelId)
-    ) {
-      const initial = pickBestInitialLabel(availableLabels);
-      setSelectedLabelId(initial?.id ?? availableLabels[0].id);
+    if (selectedLabelId && availableLabels.some((item) => item.id === selectedLabelId)) {
+      return;
     }
-  }, [availableLabels, selectedLabelId]);
+    if (selectedLabelZplKey) {
+      const byContent = availableLabels.find((item) => item.zpl.trim() === selectedLabelZplKey);
+      if (byContent) {
+        setSelectedLabelId(byContent.id);
+        return;
+      }
+    }
+    {
+      const initial = pickBestInitialLabel(availableLabels);
+      const picked = initial ?? availableLabels[0];
+      setSelectedLabelId(picked.id);
+      setSelectedLabelZplKey(picked.zpl.trim());
+    }
+  }, [availableLabels, selectedLabelId, selectedLabelZplKey]);
 
   const onSelectLabel = (id: string) => {
     setSelectedLabelId(id);
     const picked = availableLabels.find((label) => label.id === id);
-    if (picked && picked.source !== "editor") {
-      setRawInput(picked.zpl);
+    if (picked) {
+      setSelectedLabelZplKey(picked.zpl.trim());
     }
   };
 
@@ -203,6 +214,7 @@ export default function App() {
     const initial = pickBestInitialLabel(detected);
     if (initial) {
       setSelectedLabelId(initial.id);
+      setSelectedLabelZplKey(initial.zpl.trim());
       setRawInput(initial.zpl);
     }
   };

@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { detectAndDecode } from "../../core/encoding/detectAndDecode";
 import type { InputMode, LabelCandidate } from "../../core/types";
 import { MAX_ZIP_SIZE_BYTES } from "../../core/zip/limits";
@@ -23,12 +23,21 @@ function decodeBytes(bytes: Uint8Array): string {
   }
 }
 
+function isFileDragEvent(event: DragEvent): boolean {
+  const types = event.dataTransfer?.types;
+  if (!types) {
+    return false;
+  }
+  return Array.from(types).includes("Files");
+}
+
 export function ZipUpload({ onLabelsDetected }: ZipUploadProps) {
   const [busy, setBusy] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [message, setMessage] = useState<string>("Drop a file or browse.");
   const [summaryLines, setSummaryLines] = useState<string[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
+  const dragDepthRef = useRef(0);
 
   const onSelectFile = async (file?: File) => {
     if (!file) {
@@ -120,6 +129,68 @@ export function ZipUpload({ onLabelsDetected }: ZipUploadProps) {
     () => ".zip,.xml,.zpl,.txt,.prn,.json,application/zip,text/xml,text/plain,application/json",
     []
   );
+
+  useEffect(() => {
+    const onWindowDragEnter = (event: DragEvent) => {
+      if (!isFileDragEvent(event)) {
+        return;
+      }
+      event.preventDefault();
+      dragDepthRef.current += 1;
+      if (!busy) {
+        setDragActive(true);
+      }
+    };
+
+    const onWindowDragOver = (event: DragEvent) => {
+      if (!isFileDragEvent(event)) {
+        return;
+      }
+      event.preventDefault();
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = "copy";
+      }
+      if (!busy) {
+        setDragActive(true);
+      }
+    };
+
+    const onWindowDragLeave = (event: DragEvent) => {
+      if (!isFileDragEvent(event)) {
+        return;
+      }
+      event.preventDefault();
+      dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+      if (dragDepthRef.current === 0) {
+        setDragActive(false);
+      }
+    };
+
+    const onWindowDrop = (event: DragEvent) => {
+      if (!isFileDragEvent(event)) {
+        return;
+      }
+      event.preventDefault();
+      dragDepthRef.current = 0;
+      setDragActive(false);
+      if (busy) {
+        return;
+      }
+      const file = event.dataTransfer?.files?.[0];
+      void onSelectFile(file);
+    };
+
+    window.addEventListener("dragenter", onWindowDragEnter);
+    window.addEventListener("dragover", onWindowDragOver);
+    window.addEventListener("dragleave", onWindowDragLeave);
+    window.addEventListener("drop", onWindowDrop);
+    return () => {
+      window.removeEventListener("dragenter", onWindowDragEnter);
+      window.removeEventListener("dragover", onWindowDragOver);
+      window.removeEventListener("dragleave", onWindowDragLeave);
+      window.removeEventListener("drop", onWindowDrop);
+    };
+  }, [busy]);
 
   return (
     <div className="zip-upload">
