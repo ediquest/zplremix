@@ -1,11 +1,31 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent } from "react";
+import bwipjs from "bwip-js";
 
 type LabelBuilderPageProps = {
   seedZpl: string;
   onBack: (nextZpl?: string) => void;
 };
 
-type BuilderElementType = "text" | "barcode" | "line" | "box";
+type BuilderElementType =
+  | "text"
+  | "code128"
+  | "gs1128"
+  | "itf14"
+  | "code39"
+  | "pdf417"
+  | "qr"
+  | "datamatrix"
+  | "ean13"
+  | "line"
+  | "line-v"
+  | "box"
+  | "circle"
+  | "ellipse";
+type BarcodeElementType = "code128" | "gs1128" | "itf14" | "code39" | "pdf417" | "qr" | "datamatrix" | "ean13";
+type DragMode = "smooth" | "step";
+type BuilderAccordionKey = "canvas" | "grid" | "elements" | "selected" | "barcodes" | "text" | "separators" | "shapes";
+type ZplOrientation = "N" | "R" | "I" | "B";
+type ZplFont = "0" | "A" | "B" | "D" | "E" | "F" | "G" | "H";
 
 type BuilderItem = {
   id: string;
@@ -15,6 +35,19 @@ type BuilderItem = {
   width: number;
   height: number;
   text: string;
+  filled: boolean;
+  zIndex: number;
+  font: ZplFont;
+  orientation: ZplOrientation;
+};
+
+type ResizeState = {
+  id: string;
+  axis: "right" | "bottom" | "corner";
+  startMouseX: number;
+  startMouseY: number;
+  startWidth: number;
+  startHeight: number;
 };
 
 type PrintDensityDpmm = 8 | 12 | 24;
@@ -28,6 +61,9 @@ type BuilderCanvasSettings = {
 };
 
 const LS_PREVIEW_SETTINGS_KEY = "zplremix.preview.settings";
+const QR_COMPAT_OFFSET_X = 18;
+const QR_COMPAT_OFFSET_Y = 72;
+const QR_PREVIEW_DRAW_ADJUST = 0.5;
 const DEFAULT_CANVAS_SETTINGS: BuilderCanvasSettings = {
   densityDpmm: 8,
   labelWidth: 4,
@@ -79,44 +115,206 @@ function unitToMm(value: number, unit: LabelUnit): number {
   return value;
 }
 
-function createItem(type: BuilderElementType, x: number, y: number): BuilderItem {
+function estimateTextBoxWidth(text: string, fontHeight: number): number {
+  const safeHeight = Math.max(12, fontHeight);
+  const perChar = Math.max(5, Math.round(safeHeight * 0.42));
+  const padding = Math.max(8, Math.round(safeHeight * 0.45));
+  return Math.max(22, Math.round(text.length * perChar + padding));
+}
+
+function createItem(type: BuilderElementType, x: number, y: number, zIndex: number): BuilderItem {
   if (type === "text") {
-    return { id: crypto.randomUUID(), type, x, y, width: 220, height: 36, text: "New text" };
+    const text = "New text";
+    const height = 32;
+    return {
+      id: crypto.randomUUID(),
+      type,
+      x,
+      y,
+      width: estimateTextBoxWidth(text, height),
+      height,
+      text,
+      filled: false,
+      zIndex,
+      font: "0",
+      orientation: "N"
+    };
   }
-  if (type === "barcode") {
-    return { id: crypto.randomUUID(), type, x, y, width: 280, height: 120, text: "1234567890" };
+  if (type === "code128") {
+    return { id: crypto.randomUUID(), type, x, y, width: 280, height: 120, text: "1234567890", filled: false, zIndex, font: "0", orientation: "N" };
+  }
+  if (type === "gs1128") {
+    return { id: crypto.randomUUID(), type, x, y, width: 300, height: 120, text: "(00)012345678901234567", filled: false, zIndex, font: "0", orientation: "N" };
+  }
+  if (type === "itf14") {
+    return { id: crypto.randomUUID(), type, x, y, width: 280, height: 110, text: "01234567890123", filled: false, zIndex, font: "0", orientation: "N" };
+  }
+  if (type === "code39") {
+    return { id: crypto.randomUUID(), type, x, y, width: 280, height: 110, text: "CODE39-123", filled: false, zIndex, font: "0", orientation: "N" };
+  }
+  if (type === "pdf417") {
+    return { id: crypto.randomUUID(), type, x, y, width: 280, height: 140, text: "PDF417 SAMPLE DATA", filled: false, zIndex, font: "0", orientation: "N" };
+  }
+  if (type === "qr") {
+    return { id: crypto.randomUUID(), type, x, y, width: 120, height: 120, text: "https://zplremix.local", filled: false, zIndex, font: "0", orientation: "N" };
+  }
+  if (type === "datamatrix") {
+    return { id: crypto.randomUUID(), type, x, y, width: 120, height: 120, text: "DMX-123456", filled: false, zIndex, font: "0", orientation: "N" };
+  }
+  if (type === "ean13") {
+    return { id: crypto.randomUUID(), type, x, y, width: 260, height: 110, text: "5901234123457", filled: false, zIndex, font: "0", orientation: "N" };
   }
   if (type === "line") {
-    return { id: crypto.randomUUID(), type, x, y, width: 280, height: 4, text: "" };
+    return { id: crypto.randomUUID(), type, x, y, width: 280, height: 4, text: "", filled: false, zIndex, font: "0", orientation: "N" };
   }
-  return { id: crypto.randomUUID(), type, x, y, width: 240, height: 120, text: "" };
+  if (type === "line-v") {
+    return { id: crypto.randomUUID(), type, x, y, width: 4, height: 220, text: "", filled: false, zIndex, font: "0", orientation: "N" };
+  }
+  if (type === "circle") {
+    return { id: crypto.randomUUID(), type, x, y, width: 120, height: 120, text: "", filled: false, zIndex, font: "0", orientation: "N" };
+  }
+  if (type === "ellipse") {
+    return { id: crypto.randomUUID(), type, x, y, width: 180, height: 120, text: "", filled: false, zIndex, font: "0", orientation: "N" };
+  }
+  return { id: crypto.randomUUID(), type, x, y, width: 240, height: 120, text: "", filled: false, zIndex, font: "0", orientation: "N" };
 }
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+function snapToStep(value: number, step: number): number {
+  if (step <= 1) {
+    return value;
+  }
+  return Math.round(value / step) * step;
+}
+
+function softSnapToStep(value: number, step: number, threshold: number): number {
+  if (step <= 1) {
+    return value;
+  }
+  const snapped = snapToStep(value, step);
+  return Math.abs(snapped - value) <= threshold ? snapped : value;
+}
+
+function snapToItemsAxis(
+  value: number,
+  size: number,
+  axis: "x" | "y",
+  draggingId: string,
+  items: BuilderItem[],
+  threshold: number
+): number {
+  let snapped = value;
+  let bestDistance = threshold + 1;
+  for (const other of items) {
+    if (other.id === draggingId) {
+      continue;
+    }
+    const otherStart = axis === "x" ? other.x : other.y;
+    const otherEnd = axis === "x" ? other.x + other.width : other.y + other.height;
+    const otherCenter = (otherStart + otherEnd) / 2;
+    const candidates = [
+      otherStart,
+      otherEnd,
+      otherStart - size,
+      otherEnd - size,
+      otherCenter - size / 2
+    ];
+    for (const candidate of candidates) {
+      const distance = Math.abs(candidate - value);
+      if (distance <= threshold && distance < bestDistance) {
+        bestDistance = distance;
+        snapped = candidate;
+      }
+    }
+  }
+  return snapped;
+}
+
 function buildZplFromItems(items: BuilderItem[], canvasWidth: number, canvasHeight: number): string {
   const lines = ["^XA", `^PW${canvasWidth}`, `^LL${canvasHeight}`, "^LH0,0"];
-  items.forEach((item) => {
+  [...items].sort((a, b) => a.zIndex - b.zIndex).forEach((item) => {
     const x = Math.round(item.x);
     const y = Math.round(item.y);
     if (item.type === "text") {
       const textHeight = Math.max(14, Math.round(item.height * 0.8));
       const textWidth = Math.max(10, Math.round(textHeight * 0.6));
-      lines.push(`^FO${x},${y}^A0N,${textHeight},${textWidth}^FD${item.text}^FS`);
+      lines.push(`^FO${x},${y}^A${item.font}${item.orientation},${textHeight},${textWidth}^FD${item.text}^FS`);
       return;
     }
-    if (item.type === "barcode") {
+    if (item.type === "code128") {
       const barHeight = Math.max(40, Math.round(item.height));
       lines.push(`^FO${x},${y}^BY2,2,${barHeight}^BCN,${barHeight},Y,N,N^FD${item.text}^FS`);
+      return;
+    }
+    if (item.type === "gs1128") {
+      const barHeight = Math.max(40, Math.round(item.height));
+      const payload = item.text.startsWith(">8") ? item.text : `>8${item.text}`;
+      lines.push(`^FO${x},${y}^BY2,2,${barHeight}^BCN,${barHeight},Y,N,N^FD${payload}^FS`);
+      return;
+    }
+    if (item.type === "itf14") {
+      const barHeight = Math.max(40, Math.round(item.height));
+      const digits = item.text.replace(/\D/g, "").slice(0, 14) || "01234567890123";
+      lines.push(`^FO${x},${y}^BY2,2,${barHeight}^B2N,${barHeight},Y,N,N^FD${digits}^FS`);
+      return;
+    }
+    if (item.type === "code39") {
+      const barHeight = Math.max(40, Math.round(item.height));
+      lines.push(`^FO${x},${y}^BY2,2,${barHeight}^B3N,N,${barHeight},Y,N^FD${item.text}^FS`);
+      return;
+    }
+    if (item.type === "pdf417") {
+      const rows = clamp(Math.round(item.height / 16), 3, 30);
+      const colWidth = clamp(Math.round(item.width / 42), 2, 30);
+      lines.push(`^FO${x},${y}^B7N,${Math.max(2, colWidth)},${rows},4,16,N^FD${item.text}^FS`);
+      return;
+    }
+    if (item.type === "qr") {
+      const moduleSize = clamp(Math.round(Math.min(item.width, item.height) / 28), 2, 10);
+      const qx = Math.max(0, x - QR_COMPAT_OFFSET_X);
+      const qy = Math.max(0, y - QR_COMPAT_OFFSET_Y);
+      lines.push(`^FO${qx},${qy}^BQN,2,${moduleSize}^FDLA,${item.text}^FS`);
+      return;
+    }
+    if (item.type === "datamatrix") {
+      const moduleSize = clamp(Math.round(Math.min(item.width, item.height) / 24), 3, 12);
+      lines.push(`^FO${x},${y}^BXN,${moduleSize},200^FD${item.text}^FS`);
+      return;
+    }
+    if (item.type === "ean13") {
+      const barHeight = Math.max(40, Math.round(item.height));
+      const digits = item.text.replace(/\D/g, "").slice(0, 13) || "5901234123457";
+      lines.push(`^FO${x},${y}^BY2,2,${barHeight}^BEN,${barHeight},Y,N^FD${digits}^FS`);
       return;
     }
     if (item.type === "line") {
       lines.push(`^FO${x},${y}^GB${Math.round(item.width)},${Math.max(1, Math.round(item.height))},1^FS`);
       return;
     }
-    lines.push(`^FO${x},${y}^GB${Math.round(item.width)},${Math.round(item.height)},2^FS`);
+    if (item.type === "line-v") {
+      lines.push(`^FO${x},${y}^GB${Math.max(1, Math.round(item.width))},${Math.round(item.height)},1^FS`);
+      return;
+    }
+    if (item.type === "circle") {
+      const diameter = Math.max(8, Math.round(Math.min(item.width, item.height)));
+      const thickness = item.filled ? diameter : 2;
+      lines.push(`^FO${x},${y}^GC${diameter},${thickness}^FS`);
+      return;
+    }
+    if (item.type === "ellipse") {
+      const width = Math.max(8, Math.round(item.width));
+      const height = Math.max(8, Math.round(item.height));
+      const thickness = item.filled ? Math.max(1, Math.min(width, height)) : 2;
+      lines.push(`^FO${x},${y}^GE${width},${height},${thickness}^FS`);
+      return;
+    }
+    const width = Math.max(2, Math.round(item.width));
+    const height = Math.max(2, Math.round(item.height));
+    const thickness = item.filled ? Math.max(1, Math.min(width, height)) : 2;
+    lines.push(`^FO${x},${y}^GB${width},${height},${thickness}^FS`);
   });
   lines.push("^XZ");
   return lines.join("\n");
@@ -139,14 +337,181 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
       const width = Math.max(2, Number(gb[1]));
       const height = Math.max(2, Number(gb[2]));
       const border = Number(gb[3] ?? 1);
+      const isFilled = border >= Math.min(width, height) - 1;
       items.push({
         id: crypto.randomUUID(),
-        type: height <= 6 || width <= 6 || border <= 1 ? "line" : "box",
+        type: height <= 6 || width <= 6 || border <= 1 ? (height >= width ? "line-v" : "line") : "box",
         x,
         y,
         width,
         height,
-        text: ""
+        text: "",
+        filled: isFilled,
+        zIndex: items.length,
+        font: "0",
+        orientation: "N"
+      });
+      continue;
+    }
+
+    const gc = /\^GC(\d+)(?:,(\d+))?/i.exec(body);
+    if (gc) {
+      const diameter = Math.max(8, Number(gc[1]));
+      const border = Number(gc[2] ?? 2);
+      items.push({
+        id: crypto.randomUUID(),
+        type: "circle",
+        x,
+        y,
+        width: diameter,
+        height: diameter,
+        text: "",
+        filled: border >= diameter - 1,
+        zIndex: items.length,
+        font: "0",
+        orientation: "N"
+      });
+      continue;
+    }
+
+    const ge = /\^GE(\d+),(\d+)(?:,(\d+))?/i.exec(body);
+    if (ge) {
+      const width = Math.max(8, Number(ge[1]));
+      const height = Math.max(8, Number(ge[2]));
+      const border = Number(ge[3] ?? 2);
+      items.push({
+        id: crypto.randomUUID(),
+        type: "ellipse",
+        x,
+        y,
+        width,
+        height,
+        text: "",
+        filled: border >= Math.min(width, height) - 1,
+        zIndex: items.length,
+        font: "0",
+        orientation: "N"
+      });
+      continue;
+    }
+
+    if (/\^BQN/i.test(body)) {
+      const fd = /\^FD(?:[A-Z]{1,2},)?([^\\^]*)/i.exec(body);
+      const payload = fd?.[1] ?? "https://zplremix.local";
+      const bqn = /\^BQN(?:,[12])?(?:,(\d+))?/i.exec(body);
+      const magnification = clamp(Number(bqn?.[1] ?? 3), 1, 12);
+      const qrSize = estimateQrBoxSize(payload, magnification);
+      items.push({
+        id: crypto.randomUUID(),
+        type: "qr",
+        x: x + QR_COMPAT_OFFSET_X,
+        y: y + QR_COMPAT_OFFSET_Y,
+        width: qrSize.width,
+        height: qrSize.height,
+        text: payload,
+        filled: false,
+        zIndex: items.length,
+        font: "0",
+        orientation: "N"
+      });
+      continue;
+    }
+
+    if (/\^BX/i.test(body)) {
+      const fd = /\^FD([^\\^]*)/i.exec(body);
+      items.push({
+        id: crypto.randomUUID(),
+        type: "datamatrix",
+        x,
+        y,
+        width: 120,
+        height: 120,
+        text: fd?.[1] ?? "DMX-123456",
+        filled: false,
+        zIndex: items.length,
+        font: "0",
+        orientation: "N"
+      });
+      continue;
+    }
+
+    if (/\^BE/i.test(body)) {
+      const fd = /\^FD([^\\^]*)/i.exec(body);
+      const be = /\^BE[^,]*,(\d+)/i.exec(body);
+      const barHeight = Math.max(40, Number(be?.[1] ?? 100));
+      items.push({
+        id: crypto.randomUUID(),
+        type: "ean13",
+        x,
+        y,
+        width: 260,
+        height: barHeight,
+        text: fd?.[1] ?? "5901234123457",
+        filled: false,
+        zIndex: items.length,
+        font: "0",
+        orientation: "N"
+      });
+      continue;
+    }
+
+    if (/\^B7/i.test(body)) {
+      const fd = /\^FD([^\\^]*)/i.exec(body);
+      const b7 = /\^B7[^,]*,(\d+),(\d+)/i.exec(body);
+      const colWidth = Number(b7?.[1] ?? 4);
+      const rows = Number(b7?.[2] ?? 6);
+      items.push({
+        id: crypto.randomUUID(),
+        type: "pdf417",
+        x,
+        y,
+        width: Math.max(160, colWidth * 42),
+        height: Math.max(64, rows * 16),
+        text: fd?.[1] ?? "PDF417 SAMPLE DATA",
+        filled: false,
+        zIndex: items.length,
+        font: "0",
+        orientation: "N"
+      });
+      continue;
+    }
+
+    if (/\^B2/i.test(body)) {
+      const fd = /\^FD([^\\^]*)/i.exec(body);
+      const b2 = /\^B2[^,]*,(\d+)/i.exec(body);
+      const barHeight = Math.max(40, Number(b2?.[1] ?? 100));
+      items.push({
+        id: crypto.randomUUID(),
+        type: "itf14",
+        x,
+        y,
+        width: 280,
+        height: barHeight,
+        text: fd?.[1] ?? "01234567890123",
+        filled: false,
+        zIndex: items.length,
+        font: "0",
+        orientation: "N"
+      });
+      continue;
+    }
+
+    if (/\^B3/i.test(body)) {
+      const fd = /\^FD([^\\^]*)/i.exec(body);
+      const b3 = /\^B3[^,]*,[^,]*,(\d+)/i.exec(body);
+      const barHeight = Math.max(40, Number(b3?.[1] ?? 100));
+      items.push({
+        id: crypto.randomUUID(),
+        type: "code39",
+        x,
+        y,
+        width: 280,
+        height: barHeight,
+        text: fd?.[1] ?? "CODE39-123",
+        filled: false,
+        zIndex: items.length,
+        font: "0",
+        orientation: "N"
       });
       continue;
     }
@@ -155,44 +520,255 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
       const fd = /\^FD([^\\^]*)/i.exec(body);
       const bc = /\^BC[^,]*,(\d+)/i.exec(body);
       const barHeight = Math.max(40, Number(bc?.[1] ?? 100));
+      const payload = fd?.[1] ?? "1234567890";
       items.push({
         id: crypto.randomUUID(),
-        type: "barcode",
+        type: payload.startsWith(">8") ? "gs1128" : "code128",
         x,
         y,
         width: 280,
         height: barHeight,
-        text: fd?.[1] ?? "1234567890"
+        text: payload,
+        filled: false,
+        zIndex: items.length,
+        font: "0",
+        orientation: "N"
       });
       continue;
     }
 
     const fd = /\^FD([^\\^]*)/i.exec(body);
     if (fd) {
-      const a0 = /\^A0[A-Z]?,?(-?\d*)?,?(-?\d*)?/i.exec(body);
-      const h = Number(a0?.[1] || 32);
-      const w = Number(a0?.[2] || Math.round(Math.max(12, h * 0.6)));
+      const a = /\^A([A-Z0-9])([NRIB])?,?(-?\d*)?,?(-?\d*)?/i.exec(body);
+      const font = ((a?.[1] ?? "0").toUpperCase() as ZplFont);
+      const orientation = ((a?.[2] ?? "N").toUpperCase() as ZplOrientation);
+      const h = Number(a?.[3] || 32);
+      const width = estimateTextBoxWidth(fd[1], h);
       items.push({
         id: crypto.randomUUID(),
         type: "text",
         x,
         y,
-        width: Math.max(120, Math.round((fd[1].length + 2) * Math.max(8, w))),
+        width,
         height: Math.max(24, Math.round(h * 1.2)),
-        text: fd[1]
+        text: fd[1],
+        filled: false,
+        zIndex: items.length,
+        font: ["0", "A", "B", "D", "E", "F", "G", "H"].includes(font) ? font : "0",
+        orientation: ["N", "R", "I", "B"].includes(orientation) ? orientation : "N"
       });
     }
   }
   return items;
 }
 
+function isContentEditableType(type: BuilderElementType): boolean {
+  return (
+    type === "text" ||
+    type === "code128" ||
+    type === "gs1128" ||
+    type === "itf14" ||
+    type === "code39" ||
+    type === "pdf417" ||
+    type === "qr" ||
+    type === "datamatrix" ||
+    type === "ean13"
+  );
+}
+
+function isBarcodeElementType(type: BuilderElementType): boolean {
+  return (
+    type === "code128" ||
+    type === "gs1128" ||
+    type === "itf14" ||
+    type === "code39" ||
+    type === "pdf417" ||
+    type === "qr" ||
+    type === "datamatrix" ||
+    type === "ean13"
+  );
+}
+
+function normalizeEan13(value: string): string {
+  const digits = (value ?? "").replace(/\D/g, "");
+  return digits.length >= 12 ? digits.slice(0, 13) : "5901234123457";
+}
+
+function estimateQrBoxSize(text: string, magnification: number): { width: number; height: number } {
+  const fallback = Math.max(56, Math.round(Math.max(1, magnification) * 32));
+  if (typeof document === "undefined") {
+    return { width: fallback, height: fallback };
+  }
+  try {
+    const temp = document.createElement("canvas");
+    bwipjs.toCanvas(temp, {
+      bcid: "qrcode",
+      text: text || "0",
+      scale: Math.max(1, Math.min(12, Math.round(magnification))),
+      includetext: false,
+      parse: true,
+      parsefnc: true,
+      paddingwidth: 0,
+      paddingheight: 0,
+      backgroundcolor: "FFFFFF",
+      barcolor: "111827"
+    });
+    const size = Math.max(24, Math.round(Math.max(temp.width, temp.height) * QR_PREVIEW_DRAW_ADJUST));
+    return { width: size, height: size };
+  } catch {
+    return { width: fallback, height: fallback };
+  }
+}
+
+function BuilderBarcodePreview({ item }: { item: BuilderItem }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    if (!canvasRef.current || !isBarcodeElementType(item.type)) {
+      return;
+    }
+    const target = canvasRef.current;
+    const targetW = Math.max(8, Math.round(item.width));
+    const targetH = Math.max(8, Math.round(item.height));
+    const temp = document.createElement("canvas");
+    try {
+      const options: Record<string, string | number | boolean> = {
+        text: item.text || "0",
+        scale: 2,
+        includetext: item.type !== "qr" && item.type !== "datamatrix" && item.type !== "pdf417",
+        paddingwidth: 0,
+        paddingheight: 0,
+        backgroundcolor: "FFFFFF",
+        barcolor: "111827"
+      };
+      if (item.type === "code128") {
+        options.bcid = "code128";
+        options.parsefnc = true;
+      } else if (item.type === "gs1128") {
+        options.bcid = "code128";
+        const gs1Payload = item.text || "(00)012345678901234567";
+        options.text = gs1Payload.startsWith(">8") ? gs1Payload : `>8${gs1Payload}`;
+        options.parsefnc = true;
+      } else if (item.type === "itf14") {
+        options.bcid = "interleaved2of5";
+        const digits = (item.text || "01234567890123").replace(/\D/g, "").slice(0, 14);
+        options.text = digits.length % 2 === 0 ? digits : digits.slice(0, Math.max(0, digits.length - 1));
+        options.includetext = true;
+      } else if (item.type === "code39") {
+        options.bcid = "code39";
+      } else if (item.type === "pdf417") {
+        options.bcid = "pdf417";
+        options.includetext = false;
+      } else if (item.type === "qr") {
+        options.bcid = "qrcode";
+        options.includetext = false;
+      } else if (item.type === "datamatrix") {
+        options.bcid = "datamatrix";
+        options.includetext = false;
+      } else if (item.type === "ean13") {
+        options.bcid = "ean13";
+        options.text = normalizeEan13(item.text);
+      }
+      bwipjs.toCanvas(temp, options as unknown as Parameters<typeof bwipjs.toCanvas>[1]);
+      target.width = targetW;
+      target.height = targetH;
+      const ctx = target.getContext("2d");
+      if (!ctx) {
+        return;
+      }
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, targetW, targetH);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(temp, 0, 0, targetW, targetH);
+    } catch {
+      const ctx = target.getContext("2d");
+      if (!ctx) {
+        return;
+      }
+      target.width = targetW;
+      target.height = targetH;
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, targetW, targetH);
+      ctx.strokeStyle = "#1f2c3f";
+      ctx.strokeRect(0, 0, targetW, targetH);
+    }
+  }, [item]);
+
+  return <canvas ref={canvasRef} className="builder-item-barcode-canvas" />;
+}
+
+function getMinSizeForType(type: BuilderElementType): { width: number; height: number } {
+  if (type === "line") {
+    return { width: 16, height: 1 };
+  }
+  if (type === "line-v") {
+    return { width: 1, height: 16 };
+  }
+  if (type === "circle") {
+    return { width: 12, height: 12 };
+  }
+  if (type === "pdf417") {
+    return { width: 120, height: 48 };
+  }
+  if (type === "text") {
+    return { width: 22, height: 16 };
+  }
+  return { width: 12, height: 12 };
+}
+
+function isFillableType(type: BuilderElementType): boolean {
+  return type === "box" || type === "circle" || type === "ellipse";
+}
+
+function moveSelectedLayer(items: BuilderItem[], selectedId: string, mode: "up" | "down" | "front" | "back"): BuilderItem[] {
+  const ordered = [...items].sort((a, b) => a.zIndex - b.zIndex);
+  const index = ordered.findIndex((item) => item.id === selectedId);
+  if (index < 0) {
+    return items;
+  }
+  if (mode === "up" && index < ordered.length - 1) {
+    [ordered[index], ordered[index + 1]] = [ordered[index + 1], ordered[index]];
+  } else if (mode === "down" && index > 0) {
+    [ordered[index], ordered[index - 1]] = [ordered[index - 1], ordered[index]];
+  } else if (mode === "front") {
+    const [picked] = ordered.splice(index, 1);
+    ordered.push(picked);
+  } else if (mode === "back") {
+    const [picked] = ordered.splice(index, 1);
+    ordered.unshift(picked);
+  }
+  const rank = new Map<string, number>();
+  ordered.forEach((item, idx) => rank.set(item.id, idx));
+  return items.map((item) => ({ ...item, zIndex: rank.get(item.id) ?? item.zIndex }));
+}
+
 export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
   const [canvasSettings, setCanvasSettings] = useState<BuilderCanvasSettings>(() => loadCanvasSettings());
   const [items, setItems] = useState<BuilderItem[]>(() => parseItemsFromZpl(seedZpl));
+  const [selectedBarcodeType, setSelectedBarcodeType] = useState<BarcodeElementType>("code128");
+  const [isDirty, setIsDirty] = useState(false);
+  const [gridSize, setGridSize] = useState(24);
+  const [gridDarkness, setGridDarkness] = useState(22);
+  const [dragMode, setDragMode] = useState<DragMode>("smooth");
+  const [dragStep, setDragStep] = useState(12);
+  const [snapToGridEnabled, setSnapToGridEnabled] = useState(true);
+  const [snapToItemsEnabled, setSnapToItemsEnabled] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [resizing, setResizing] = useState<ResizeState | null>(null);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+  const [accordionOpen, setAccordionOpen] = useState<Record<BuilderAccordionKey, boolean>>({
+    canvas: false,
+    grid: false,
+    elements: false,
+    selected: false,
+    barcodes: false,
+    text: false,
+    separators: false,
+    shapes: false
+  });
   const canvasRef = useRef<HTMLDivElement>(null);
+
   const canvasWidth = useMemo(() => {
     const mm = unitToMm(canvasSettings.labelWidth, canvasSettings.labelUnit);
     return Math.max(40, Math.round(mm * canvasSettings.densityDpmm));
@@ -203,24 +779,71 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
   }, [canvasSettings.labelHeight, canvasSettings.labelUnit, canvasSettings.densityDpmm]);
   const viewScale = useMemo(() => {
     const maxSide = Math.max(canvasWidth, canvasHeight);
-    const autoFit = 560 / maxSide;
-    return clamp(autoFit, 0.22, 1);
+    const autoFit = 680 / maxSide;
+    return clamp(autoFit, 0.28, 1);
   }, [canvasWidth, canvasHeight]);
 
-  const selectedItem = useMemo(
-    () => items.find((item) => item.id === selectedId) ?? null,
-    [items, selectedId]
-  );
-  const generatedZpl = useMemo(
-    () => buildZplFromItems(items, canvasWidth, canvasHeight),
-    [items, canvasWidth, canvasHeight]
-  );
+  const selectedItem = useMemo(() => items.find((item) => item.id === selectedId) ?? null, [items, selectedId]);
+  const generatedZpl = useMemo(() => buildZplFromItems(items, canvasWidth, canvasHeight), [items, canvasWidth, canvasHeight]);
   const sizeRange =
     canvasSettings.labelUnit === "in"
       ? { min: 1, max: 12, step: 0.1 }
       : canvasSettings.labelUnit === "cm"
         ? { min: 2, max: 30, step: 0.1 }
         : { min: 20, max: 300, step: 1 };
+  const safeGridSize = clamp(Math.round(gridSize), 8, 80);
+  const safeGridDarkness = clamp(Math.round(gridDarkness), 8, 65);
+  const safeDragStep = clamp(Math.round(dragStep), 1, 64);
+  const gridAlpha = clamp(safeGridDarkness / 100, 0.08, 0.65);
+
+  const onGridSizeChange = (value: number) => setGridSize(clamp(Math.round(value), 8, 80));
+  const onGridDarknessChange = (value: number) => setGridDarkness(clamp(Math.round(value), 8, 65));
+  const onDragStepChange = (value: number) => setDragStep(clamp(Math.round(value), 1, 64));
+  const updateCanvasSettings = (updater: (prev: BuilderCanvasSettings) => BuilderCanvasSettings) => {
+    setCanvasSettings((prev) => updater(prev));
+    setIsDirty(true);
+  };
+  const toggleAccordion = (key: BuilderAccordionKey) => {
+    setAccordionOpen((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const resolveDragPosition = (
+    nextX: number,
+    nextY: number,
+    currentItem: BuilderItem,
+    allItems: BuilderItem[]
+  ): { x: number; y: number } => {
+    let x = nextX;
+    let y = nextY;
+    const step = safeDragStep;
+    const gridSnapThreshold = Math.max(3, Math.round(safeGridSize * 0.22));
+    const elementSnapThreshold = Math.max(7, Math.round(Math.min(safeGridSize, step) * 0.55));
+
+    if (dragMode === "step") {
+      x = snapToStep(x, step);
+      y = snapToStep(y, step);
+    }
+    if (snapToGridEnabled) {
+      if (dragMode === "step") {
+        x = snapToStep(x, safeGridSize);
+        y = snapToStep(y, safeGridSize);
+      } else {
+        x = softSnapToStep(x, safeGridSize, gridSnapThreshold);
+        y = softSnapToStep(y, safeGridSize, gridSnapThreshold);
+      }
+    }
+    if (snapToItemsEnabled) {
+      x = snapToItemsAxis(x, currentItem.width, "x", currentItem.id, allItems, elementSnapThreshold);
+      y = snapToItemsAxis(y, currentItem.height, "y", currentItem.id, allItems, elementSnapThreshold);
+    }
+
+    const maxX = canvasWidth - Math.max(12, currentItem.width);
+    const maxY = canvasHeight - Math.max(12, currentItem.height);
+    return {
+      x: clamp(x, 0, maxX),
+      y: clamp(y, 0, maxY)
+    };
+  };
 
   useEffect(() => {
     setItems((prev) =>
@@ -240,7 +863,33 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     setItems(parseItemsFromZpl(seedZpl));
     setSelectedId(null);
     setDraggingId(null);
+    setIsDirty(false);
   }, [seedZpl]);
+
+  useEffect(() => {
+    if (!selectedItem) {
+      return;
+    }
+    setAccordionOpen((prev) => (prev.selected ? prev : { ...prev, selected: true }));
+  }, [selectedItem]);
+
+  useEffect(() => {
+    if (!draggingId && !resizing) {
+      return;
+    }
+    const handleMouseMove = (event: globalThis.MouseEvent) => {
+      onCanvasPointerMove(event.clientX, event.clientY);
+    };
+    const handleMouseUp = () => {
+      stopDrag();
+    };
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [draggingId, resizing, viewScale, safeGridSize, safeDragStep, snapToGridEnabled, snapToItemsEnabled, dragMode]);
 
   useEffect(() => {
     try {
@@ -263,12 +912,6 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     }
   }, [canvasSettings]);
 
-  const addAt = (type: BuilderElementType, x: number, y: number) => {
-    const item = createItem(type, x, y);
-    setItems((prev) => [...prev, item]);
-    setSelectedId(item.id);
-  };
-
   const onPaletteDragStart = (e: DragEvent<HTMLButtonElement>, type: BuilderElementType) => {
     e.dataTransfer.setData("application/x-zplremix-builder-item", type);
   };
@@ -280,9 +923,16 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
       return;
     }
     const rect = e.currentTarget.getBoundingClientRect();
-    const x = clamp((e.clientX - rect.left) / viewScale, 0, canvasWidth - 20);
-    const y = clamp((e.clientY - rect.top) / viewScale, 0, canvasHeight - 20);
-    addAt(type, x, y);
+    const rawX = clamp((e.clientX - rect.left) / viewScale, 0, canvasWidth - 20);
+    const rawY = clamp((e.clientY - rect.top) / viewScale, 0, canvasHeight - 20);
+    const nextLayer = items.length ? Math.max(...items.map((item) => item.zIndex)) + 1 : 0;
+    const draft = createItem(type, rawX, rawY, nextLayer);
+    const pos = resolveDragPosition(rawX, rawY, draft, items);
+    draft.x = pos.x;
+    draft.y = pos.y;
+    setItems((prev) => [...prev, draft]);
+    setSelectedId(draft.id);
+    setIsDirty(true);
   };
 
   const onItemMouseDown = (e: MouseEvent, item: BuilderItem) => {
@@ -297,30 +947,99 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     setDragOffset({ x: x - item.x, y: y - item.y });
   };
 
-  const onCanvasMouseMove = (e: MouseEvent) => {
-    if (!draggingId || !canvasRef.current) {
+  const onResizeHandleMouseDown = (e: MouseEvent, item: BuilderItem, axis: "right" | "bottom" | "corner") => {
+    if (!canvasRef.current) {
       return;
     }
+    e.preventDefault();
+    e.stopPropagation();
     const rect = canvasRef.current.getBoundingClientRect();
     const x = (e.clientX - rect.left) / viewScale;
     const y = (e.clientY - rect.top) / viewScale;
+    setSelectedId(item.id);
+    setDraggingId(null);
+    setResizing({
+      id: item.id,
+      axis,
+      startMouseX: x,
+      startMouseY: y,
+      startWidth: item.width,
+      startHeight: item.height
+    });
+  };
+
+  const onCanvasPointerMove = (clientX: number, clientY: number) => {
+    if (!canvasRef.current) {
+      return;
+    }
+    if (resizing) {
+      const rect = canvasRef.current.getBoundingClientRect();
+      const x = (clientX - rect.left) / viewScale;
+      const y = (clientY - rect.top) / viewScale;
+      const deltaX = x - resizing.startMouseX;
+      const deltaY = y - resizing.startMouseY;
+      setItems((prev) =>
+        prev.map((item) => {
+          if (item.id !== resizing.id) {
+            return item;
+          }
+          const minSize = getMinSizeForType(item.type);
+          const useX = resizing.axis === "right" || resizing.axis === "corner";
+          const useY = resizing.axis === "bottom" || resizing.axis === "corner";
+          let nextWidth = useX ? resizing.startWidth + deltaX : item.width;
+          let nextHeight = useY ? resizing.startHeight + deltaY : item.height;
+          if (dragMode === "step") {
+            if (useX) nextWidth = snapToStep(nextWidth, safeDragStep);
+            if (useY) nextHeight = snapToStep(nextHeight, safeDragStep);
+          }
+          if (snapToGridEnabled) {
+            if (useX) nextWidth = snapToStep(nextWidth, safeGridSize);
+            if (useY) nextHeight = snapToStep(nextHeight, safeGridSize);
+          }
+          if (useX) nextWidth = Math.max(minSize.width, nextWidth);
+          if (useY) nextHeight = Math.max(minSize.height, nextHeight);
+          const maxWidth = canvasWidth - item.x;
+          const maxHeight = canvasHeight - item.y;
+          return {
+            ...item,
+            width: useX ? clamp(nextWidth, minSize.width, maxWidth) : item.width,
+            height: useY ? clamp(nextHeight, minSize.height, maxHeight) : item.height
+          };
+        })
+      );
+      setIsDirty(true);
+      return;
+    }
+    if (!draggingId) {
+      return;
+    }
+    const rect = canvasRef.current.getBoundingClientRect();
+    const x = (clientX - rect.left) / viewScale;
+    const y = (clientY - rect.top) / viewScale;
     setItems((prev) =>
       prev.map((item) => {
         if (item.id !== draggingId) {
           return item;
         }
-        const maxX = canvasWidth - Math.max(12, item.width);
-        const maxY = canvasHeight - Math.max(12, item.height);
+        const pos = resolveDragPosition(x - dragOffset.x, y - dragOffset.y, item, prev);
         return {
           ...item,
-          x: clamp(x - dragOffset.x, 0, maxX),
-          y: clamp(y - dragOffset.y, 0, maxY)
+          x: pos.x,
+          y: pos.y
         };
       })
     );
+    setIsDirty(true);
   };
 
-  const stopDrag = () => setDraggingId(null);
+  const onCanvasMouseMove = (e: MouseEvent) => {
+    onCanvasPointerMove(e.clientX, e.clientY);
+  };
+
+  const stopDrag = () => {
+    setDraggingId(null);
+    setResizing(null);
+  };
 
   const updateSelected = (patch: Partial<BuilderItem>) => {
     if (!selectedId) {
@@ -332,15 +1051,23 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
           return item;
         }
         const next = { ...item, ...patch };
+        const normalizedWidth =
+          item.type === "text" && patch.text !== undefined && patch.width === undefined
+            ? estimateTextBoxWidth(next.text, next.height)
+            : next.width;
+        const minSize = getMinSizeForType(item.type);
+        const nextWidth = Math.max(minSize.width, normalizedWidth);
+        const nextHeight = Math.max(minSize.height, next.height);
         return {
           ...next,
-          width: Math.max(2, next.width),
-          height: Math.max(2, next.height),
-          x: clamp(next.x, 0, canvasWidth - Math.max(12, next.width)),
-          y: clamp(next.y, 0, canvasHeight - Math.max(12, next.height))
+          width: nextWidth,
+          height: nextHeight,
+          x: clamp(next.x, 0, canvasWidth - Math.max(12, nextWidth)),
+          y: clamp(next.y, 0, canvasHeight - Math.max(12, nextHeight))
         };
       })
     );
+    setIsDirty(true);
   };
 
   const removeSelected = () => {
@@ -349,6 +1076,23 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     }
     setItems((prev) => prev.filter((item) => item.id !== selectedId));
     setSelectedId(null);
+    setIsDirty(true);
+  };
+
+  const resetToNewLabel = () => {
+    setItems([]);
+    setSelectedId(null);
+    setDraggingId(null);
+    setResizing(null);
+    setIsDirty(true);
+  };
+
+  const changeSelectedLayer = (mode: "up" | "down" | "front" | "back") => {
+    if (!selectedId) {
+      return;
+    }
+    setItems((prev) => moveSelectedLayer(prev, selectedId, mode));
+    setIsDirty(true);
   };
 
   useEffect(() => {
@@ -358,31 +1102,30 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
       }
       const target = event.target as HTMLElement | null;
       const tag = target?.tagName;
-      if (
-        tag === "INPUT" ||
-        tag === "TEXTAREA" ||
-        tag === "SELECT" ||
-        target?.isContentEditable
-      ) {
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target?.isContentEditable) {
         return;
       }
       event.preventDefault();
       setItems((prev) => prev.filter((item) => item.id !== selectedId));
       setSelectedId(null);
+      setIsDirty(true);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [selectedId]);
 
   return (
-    <main className="app-shell">
+    <main className="app-shell builder-shell">
       <header className="app-header builder-header">
         <h1>ZPLRemix Builder</h1>
         <div className="builder-header-actions">
+          <button type="button" className="download-btn" onClick={resetToNewLabel}>
+            New Label
+          </button>
           <button type="button" className="download-btn" onClick={() => onBack()}>
             Back
           </button>
-          <button type="button" className="download-btn" onClick={() => onBack(generatedZpl)}>
+          <button type="button" className="download-btn" onClick={() => onBack(isDirty ? generatedZpl : seedZpl)}>
             Apply To Main View
           </button>
         </div>
@@ -390,174 +1133,406 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
 
       <section className="builder-grid">
         <aside className="builder-sidebar">
-          <h2>Canvas Settings</h2>
-          <div className="printer-profile">
-            <div className="printer-row">
-              <label htmlFor="builder-density">DPI / Density:</label>
-              <div className="printer-controls">
-                <select
-                  id="builder-density"
-                  value={canvasSettings.densityDpmm}
-                  onChange={(e) =>
-                    setCanvasSettings((prev) => ({
-                      ...prev,
-                      densityDpmm: Number(e.target.value) as PrintDensityDpmm
-                    }))
-                  }
-                >
-                  <option value={8}>8 dpmm (203 dpi)</option>
-                  <option value={12}>12 dpmm (300 dpi)</option>
-                  <option value={24}>24 dpmm (600 dpi)</option>
-                </select>
+          <section className={`builder-accordion${accordionOpen.canvas ? " is-open" : ""}`}>
+            <button type="button" className="builder-accordion-toggle" onClick={() => toggleAccordion("canvas")} aria-expanded={accordionOpen.canvas}>
+              <span>Canvas Settings</span>
+              <span className="builder-accordion-icon" aria-hidden>{accordionOpen.canvas ? "-" : "+"}</span>
+            </button>
+            <div className="builder-accordion-body">
+              <div className="printer-profile">
+                <div className="printer-row">
+                  <label htmlFor="builder-density">DPI / Density:</label>
+                  <div className="printer-controls">
+                    <select
+                      id="builder-density"
+                      value={canvasSettings.densityDpmm}
+                      onChange={(e) =>
+                        updateCanvasSettings((prev) => ({
+                          ...prev,
+                          densityDpmm: Number(e.target.value) as PrintDensityDpmm
+                        }))
+                      }
+                    >
+                      <option value={8}>8 dpmm (203 dpi)</option>
+                      <option value={12}>12 dpmm (300 dpi)</option>
+                      <option value={24}>24 dpmm (600 dpi)</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="printer-row printer-row-size">
+                  <label>Label Size:</label>
+                  <div className="printer-controls size-controls">
+                    <div className="size-line">
+                      <span>W</span>
+                      <input
+                        type="range"
+                        min={sizeRange.min}
+                        max={sizeRange.max}
+                        step={sizeRange.step}
+                        value={canvasSettings.labelWidth}
+                        onChange={(e) =>
+                          updateCanvasSettings((prev) => ({
+                            ...prev,
+                            labelWidth: Math.max(0.1, Number(e.target.value))
+                          }))
+                        }
+                      />
+                      <input
+                        type="number"
+                        min={sizeRange.min}
+                        max={sizeRange.max}
+                        step={sizeRange.step}
+                        value={canvasSettings.labelWidth}
+                        onChange={(e) =>
+                          updateCanvasSettings((prev) => ({
+                            ...prev,
+                            labelWidth: Math.max(0.1, Number(e.target.value))
+                          }))
+                        }
+                      />
+                    </div>
+                    <div className="size-line">
+                      <span>H</span>
+                      <input
+                        type="range"
+                        min={sizeRange.min}
+                        max={sizeRange.max}
+                        step={sizeRange.step}
+                        value={canvasSettings.labelHeight}
+                        onChange={(e) =>
+                          updateCanvasSettings((prev) => ({
+                            ...prev,
+                            labelHeight: Math.max(0.1, Number(e.target.value))
+                          }))
+                        }
+                      />
+                      <input
+                        type="number"
+                        min={sizeRange.min}
+                        max={sizeRange.max}
+                        step={sizeRange.step}
+                        value={canvasSettings.labelHeight}
+                        onChange={(e) =>
+                          updateCanvasSettings((prev) => ({
+                            ...prev,
+                            labelHeight: Math.max(0.1, Number(e.target.value))
+                          }))
+                        }
+                      />
+                    </div>
+                    <select
+                      value={canvasSettings.labelUnit}
+                      onChange={(e) => updateCanvasSettings((prev) => ({ ...prev, labelUnit: e.target.value as LabelUnit }))}
+                    >
+                      <option value="in">inches</option>
+                      <option value="mm">mm</option>
+                      <option value="cm">cm</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+              <p className="muted">
+                Canvas dots: {canvasWidth} x {canvasHeight}
+              </p>
+            </div>
+          </section>
+
+          <section className={`builder-accordion${accordionOpen.grid ? " is-open" : ""}`}>
+            <button type="button" className="builder-accordion-toggle" onClick={() => toggleAccordion("grid")} aria-expanded={accordionOpen.grid}>
+              <span>Grid & Snap</span>
+              <span className="builder-accordion-icon" aria-hidden>{accordionOpen.grid ? "-" : "+"}</span>
+            </button>
+            <div className="builder-accordion-body">
+              <div className="printer-profile">
+                <div className="printer-row printer-row-size">
+                  <label>Grid Size:</label>
+                  <div className="printer-controls size-controls">
+                    <div className="size-line">
+                      <span>px</span>
+                      <input
+                        type="range"
+                        min={8}
+                        max={80}
+                        step={1}
+                        value={safeGridSize}
+                        onChange={(e) => onGridSizeChange(Number(e.target.value))}
+                      />
+                      <input
+                        type="number"
+                        min={8}
+                        max={80}
+                        step={1}
+                        value={safeGridSize}
+                        onChange={(e) => onGridSizeChange(Number(e.target.value))}
+                      />
+                    </div>
+                  </div>
+                </div>
+                <div className="printer-row printer-row-size">
+                  <label>Grid Darkness:</label>
+                  <div className="printer-controls size-controls">
+                    <div className="size-line">
+                      <span>%</span>
+                      <input
+                        type="range"
+                        min={8}
+                        max={65}
+                        step={1}
+                        value={safeGridDarkness}
+                        onChange={(e) => onGridDarknessChange(Number(e.target.value))}
+                      />
+                      <input
+                        type="number"
+                        min={8}
+                        max={65}
+                        step={1}
+                        value={safeGridDarkness}
+                        onChange={(e) => onGridDarknessChange(Number(e.target.value))}
+                      />
+                    </div>
+                  </div>
+                </div>
+                <div className="printer-row">
+                  <label htmlFor="builder-drag-mode">Drag Mode:</label>
+                  <div className="printer-controls">
+                    <select id="builder-drag-mode" value={dragMode} onChange={(e) => setDragMode(e.target.value as DragMode)}>
+                      <option value="smooth">Smooth (free)</option>
+                      <option value="step">Step</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="printer-row printer-row-size">
+                  <label>Step Size:</label>
+                  <div className="printer-controls size-controls">
+                    <div className="size-line">
+                      <span>px</span>
+                      <input
+                        type="range"
+                        min={1}
+                        max={64}
+                        step={1}
+                        value={safeDragStep}
+                        onChange={(e) => onDragStepChange(Number(e.target.value))}
+                      />
+                      <input
+                        type="number"
+                        min={1}
+                        max={64}
+                        step={1}
+                        value={safeDragStep}
+                        onChange={(e) => onDragStepChange(Number(e.target.value))}
+                      />
+                    </div>
+                  </div>
+                </div>
+                <div className="printer-row printer-row-toggle">
+                  <label htmlFor="builder-snap-grid">Snap To Grid</label>
+                  <div className="printer-controls">
+                    <input
+                      id="builder-snap-grid"
+                      type="checkbox"
+                      checked={snapToGridEnabled}
+                      onChange={(e) => setSnapToGridEnabled(e.target.checked)}
+                    />
+                  </div>
+                </div>
+                <div className="printer-row printer-row-toggle">
+                  <label htmlFor="builder-snap-items">Snap To Elements</label>
+                  <div className="printer-controls">
+                    <input
+                      id="builder-snap-items"
+                      type="checkbox"
+                      checked={snapToItemsEnabled}
+                      onChange={(e) => setSnapToItemsEnabled(e.target.checked)}
+                    />
+                  </div>
+                </div>
               </div>
             </div>
-            <div className="printer-row printer-row-size">
-              <label>Label Size:</label>
-              <div className="printer-controls size-controls">
-                <div className="size-line">
-                  <span>W</span>
-                  <input
-                    type="range"
-                    min={sizeRange.min}
-                    max={sizeRange.max}
-                    step={sizeRange.step}
-                    value={canvasSettings.labelWidth}
-                    onChange={(e) =>
-                      setCanvasSettings((prev) => ({
-                        ...prev,
-                        labelWidth: Math.max(0.1, Number(e.target.value))
-                      }))
-                    }
-                  />
-                  <input
-                    type="number"
-                    min={sizeRange.min}
-                    max={sizeRange.max}
-                    step={sizeRange.step}
-                    value={canvasSettings.labelWidth}
-                    onChange={(e) =>
-                      setCanvasSettings((prev) => ({
-                        ...prev,
-                        labelWidth: Math.max(0.1, Number(e.target.value))
-                      }))
-                    }
-                  />
-                </div>
-                <div className="size-line">
-                  <span>H</span>
-                  <input
-                    type="range"
-                    min={sizeRange.min}
-                    max={sizeRange.max}
-                    step={sizeRange.step}
-                    value={canvasSettings.labelHeight}
-                    onChange={(e) =>
-                      setCanvasSettings((prev) => ({
-                        ...prev,
-                        labelHeight: Math.max(0.1, Number(e.target.value))
-                      }))
-                    }
-                  />
-                  <input
-                    type="number"
-                    min={sizeRange.min}
-                    max={sizeRange.max}
-                    step={sizeRange.step}
-                    value={canvasSettings.labelHeight}
-                    onChange={(e) =>
-                      setCanvasSettings((prev) => ({
-                        ...prev,
-                        labelHeight: Math.max(0.1, Number(e.target.value))
-                      }))
-                    }
-                  />
-                </div>
-                <select
-                  value={canvasSettings.labelUnit}
-                  onChange={(e) =>
-                    setCanvasSettings((prev) => ({ ...prev, labelUnit: e.target.value as LabelUnit }))
-                  }
-                >
-                  <option value="in">inches</option>
-                  <option value="mm">mm</option>
-                  <option value="cm">cm</option>
-                </select>
+          </section>
+
+          <section className={`builder-accordion${accordionOpen.elements ? " is-open" : ""}`}>
+            <button type="button" className="builder-accordion-toggle" onClick={() => toggleAccordion("elements")} aria-expanded={accordionOpen.elements}>
+              <span>Elements</span>
+              <span className="builder-accordion-icon" aria-hidden>{accordionOpen.elements ? "-" : "+"}</span>
+            </button>
+            <div className="builder-accordion-body">
+              <div className="builder-palette">
+                <section className={`builder-sub-accordion${accordionOpen.text ? " is-open" : ""}`}>
+                  <button type="button" className="builder-sub-accordion-toggle" onClick={() => toggleAccordion("text")} aria-expanded={accordionOpen.text}>
+                    <span>Text</span>
+                    <span className="builder-sub-accordion-icon" aria-hidden>{accordionOpen.text ? "-" : "+"}</span>
+                  </button>
+                  <div className="builder-sub-accordion-body">
+                    <button type="button" draggable onDragStart={(e) => onPaletteDragStart(e, "text")}>
+                      Add Text
+                    </button>
+                  </div>
+                </section>
+                <section className={`builder-sub-accordion${accordionOpen.separators ? " is-open" : ""}`}>
+                  <button type="button" className="builder-sub-accordion-toggle" onClick={() => toggleAccordion("separators")} aria-expanded={accordionOpen.separators}>
+                    <span>Separators</span>
+                    <span className="builder-sub-accordion-icon" aria-hidden>{accordionOpen.separators ? "-" : "+"}</span>
+                  </button>
+                  <div className="builder-sub-accordion-body">
+                    <button type="button" draggable onDragStart={(e) => onPaletteDragStart(e, "line")}>
+                      Horizontal Line
+                    </button>
+                    <button type="button" draggable onDragStart={(e) => onPaletteDragStart(e, "line-v")}>
+                      Vertical Line
+                    </button>
+                  </div>
+                </section>
+                <section className={`builder-sub-accordion${accordionOpen.shapes ? " is-open" : ""}`}>
+                  <button type="button" className="builder-sub-accordion-toggle" onClick={() => toggleAccordion("shapes")} aria-expanded={accordionOpen.shapes}>
+                    <span>Shapes</span>
+                    <span className="builder-sub-accordion-icon" aria-hidden>{accordionOpen.shapes ? "-" : "+"}</span>
+                  </button>
+                  <div className="builder-sub-accordion-body">
+                    <button type="button" draggable onDragStart={(e) => onPaletteDragStart(e, "box")}>
+                      Rectangle
+                    </button>
+                    <button type="button" draggable onDragStart={(e) => onPaletteDragStart(e, "circle")}>
+                      Circle
+                    </button>
+                    <button type="button" draggable onDragStart={(e) => onPaletteDragStart(e, "ellipse")}>
+                      Ellipse
+                    </button>
+                  </div>
+                </section>
+                <section className={`builder-sub-accordion${accordionOpen.barcodes ? " is-open" : ""}`}>
+                  <button type="button" className="builder-sub-accordion-toggle" onClick={() => toggleAccordion("barcodes")} aria-expanded={accordionOpen.barcodes}>
+                    <span>Barcodes</span>
+                    <span className="builder-sub-accordion-icon" aria-hidden>{accordionOpen.barcodes ? "-" : "+"}</span>
+                  </button>
+                  <div className="builder-sub-accordion-body">
+                    <select
+                      value={selectedBarcodeType}
+                      onChange={(e) => setSelectedBarcodeType(e.target.value as BarcodeElementType)}
+                      aria-label="Barcode type"
+                    >
+                      <option value="code128">Code128</option>
+                      <option value="gs1128">GS1-128</option>
+                      <option value="itf14">ITF-14</option>
+                      <option value="code39">Code39</option>
+                      <option value="pdf417">PDF417</option>
+                      <option value="qr">QR</option>
+                      <option value="datamatrix">DataMatrix</option>
+                      <option value="ean13">EAN-13</option>
+                    </select>
+                    <button type="button" draggable onDragStart={(e) => onPaletteDragStart(e, selectedBarcodeType)}>
+                      Barcode
+                    </button>
+                  </div>
+                </section>
               </div>
+              <p className="muted">Drag element and drop it on canvas.</p>
             </div>
-          </div>
-          <p className="muted">
-            Canvas dots: {canvasWidth} x {canvasHeight}
-          </p>
+          </section>
 
-          <h2>Elements</h2>
-          <div className="builder-palette">
-            <button type="button" draggable onDragStart={(e) => onPaletteDragStart(e, "text")}>
-              Text
+          <section className={`builder-accordion${accordionOpen.selected ? " is-open" : ""}`}>
+            <button type="button" className="builder-accordion-toggle" onClick={() => toggleAccordion("selected")} aria-expanded={accordionOpen.selected}>
+              <span>Selected</span>
+              <span className="builder-accordion-icon" aria-hidden>{accordionOpen.selected ? "-" : "+"}</span>
             </button>
-            <button type="button" draggable onDragStart={(e) => onPaletteDragStart(e, "barcode")}>
-              Barcode
-            </button>
-            <button type="button" draggable onDragStart={(e) => onPaletteDragStart(e, "line")}>
-              Separator
-            </button>
-            <button type="button" draggable onDragStart={(e) => onPaletteDragStart(e, "box")}>
-              Box
-            </button>
-          </div>
-          <p className="muted">Drag element and drop it on canvas.</p>
-
-          <h3>Selected</h3>
-          {selectedItem ? (
-            <div className="builder-form">
-              <label>
-                X
-                <input
-                  type="number"
-                  value={Math.round(selectedItem.x)}
-                  onChange={(e) => updateSelected({ x: Number(e.target.value) })}
-                />
-              </label>
-              <label>
-                Y
-                <input
-                  type="number"
-                  value={Math.round(selectedItem.y)}
-                  onChange={(e) => updateSelected({ y: Number(e.target.value) })}
-                />
-              </label>
-              <label>
-                W
-                <input
-                  type="number"
-                  value={Math.round(selectedItem.width)}
-                  onChange={(e) => updateSelected({ width: Number(e.target.value) })}
-                />
-              </label>
-              <label>
-                H
-                <input
-                  type="number"
-                  value={Math.round(selectedItem.height)}
-                  onChange={(e) => updateSelected({ height: Number(e.target.value) })}
-                />
-              </label>
-              {(selectedItem.type === "text" || selectedItem.type === "barcode") && (
-                <label>
-                  Content
-                  <input
-                    type="text"
-                    value={selectedItem.text}
-                    onChange={(e) => updateSelected({ text: e.target.value })}
-                  />
-                </label>
+            <div className="builder-accordion-body">
+              {selectedItem ? (
+                <div className="builder-form">
+                  <label>
+                    X
+                    <input type="number" value={Math.round(selectedItem.x)} onChange={(e) => updateSelected({ x: Number(e.target.value) })} />
+                  </label>
+                  <label>
+                    Y
+                    <input type="number" value={Math.round(selectedItem.y)} onChange={(e) => updateSelected({ y: Number(e.target.value) })} />
+                  </label>
+                  <label>
+                    W
+                    <input
+                      type="number"
+                      value={Math.round(selectedItem.width)}
+                      onChange={(e) => updateSelected({ width: Number(e.target.value) })}
+                    />
+                  </label>
+                  <label>
+                    H
+                    <input
+                      type="number"
+                      value={Math.round(selectedItem.height)}
+                      onChange={(e) => updateSelected({ height: Number(e.target.value) })}
+                    />
+                  </label>
+                  {isFillableType(selectedItem.type) && (
+                    <label className="builder-form-checkbox">
+                      Filled
+                      <input
+                        type="checkbox"
+                        checked={selectedItem.filled}
+                        onChange={(e) => updateSelected({ filled: e.target.checked })}
+                      />
+                    </label>
+                  )}
+                  {isContentEditableType(selectedItem.type) && (
+                    <label>
+                      Content
+                      <input type="text" value={selectedItem.text} onChange={(e) => updateSelected({ text: e.target.value })} />
+                    </label>
+                  )}
+                  {selectedItem.type === "text" && (
+                    <label>
+                      Font
+                      <select
+                        value={selectedItem.font}
+                        onChange={(e) => updateSelected({ font: e.target.value as ZplFont })}
+                      >
+                        <option value="0">0 (scalable)</option>
+                        <option value="A">A</option>
+                        <option value="B">B</option>
+                        <option value="D">D</option>
+                        <option value="E">E</option>
+                        <option value="F">F</option>
+                        <option value="G">G</option>
+                        <option value="H">H</option>
+                      </select>
+                    </label>
+                  )}
+                  {selectedItem.type === "text" && (
+                    <label>
+                      Orientation
+                      <select
+                        value={selectedItem.orientation}
+                        onChange={(e) => updateSelected({ orientation: e.target.value as ZplOrientation })}
+                      >
+                        <option value="N">N (normal)</option>
+                        <option value="R">R (90)</option>
+                        <option value="I">I (180)</option>
+                        <option value="B">B (270)</option>
+                      </select>
+                    </label>
+                  )}
+                  <div className="builder-layer-tools">
+                    <button type="button" className="download-btn" onClick={() => changeSelectedLayer("back")}>
+                      Send Back
+                    </button>
+                    <button type="button" className="download-btn" onClick={() => changeSelectedLayer("down")}>
+                      Backward
+                    </button>
+                    <button type="button" className="download-btn" onClick={() => changeSelectedLayer("up")}>
+                      Forward
+                    </button>
+                    <button type="button" className="download-btn" onClick={() => changeSelectedLayer("front")}>
+                      Bring Front
+                    </button>
+                  </div>
+                  <button type="button" className="download-btn" onClick={removeSelected}>
+                    Delete Element
+                  </button>
+                </div>
+              ) : (
+                <p className="muted">Click an element on canvas to edit.</p>
               )}
-              <button type="button" className="download-btn" onClick={removeSelected}>
-                Delete Element
-              </button>
             </div>
-          ) : (
-            <p className="muted">Click an element on canvas to edit.</p>
-          )}
+          </section>
         </aside>
 
         <section className="builder-canvas-wrap">
@@ -565,27 +1540,55 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
           <div
             ref={canvasRef}
             className="builder-canvas"
-            style={{ width: `${canvasWidth * viewScale}px`, height: `${canvasHeight * viewScale}px` }}
+            style={{
+              width: `${canvasWidth * viewScale}px`,
+              height: `${canvasHeight * viewScale}px`,
+              backgroundImage:
+                `linear-gradient(0deg, rgba(210, 223, 242, ${gridAlpha}) 1px, transparent 1px), ` +
+                `linear-gradient(90deg, rgba(210, 223, 242, ${gridAlpha}) 1px, transparent 1px), ` +
+                "linear-gradient(#fdfefe, #fdfefe)",
+              backgroundSize: `${safeGridSize}px ${safeGridSize}px, ${safeGridSize}px ${safeGridSize}px, auto`
+            }}
             onDragOver={(e) => e.preventDefault()}
             onDrop={onCanvasDrop}
             onMouseMove={onCanvasMouseMove}
             onMouseUp={stopDrag}
-            onMouseLeave={stopDrag}
           >
-            {items.map((item) => (
+            {[...items].sort((a, b) => a.zIndex - b.zIndex).map((item) => (
               <div
                 key={item.id}
-                className={`builder-item builder-item-${item.type}${selectedId === item.id ? " is-selected" : ""}`}
+                className={`builder-item builder-item-${item.type}${selectedId === item.id ? " is-selected" : ""}${item.filled ? " is-filled" : ""}`}
                 style={{
                   left: `${item.x * viewScale}px`,
                   top: `${item.y * viewScale}px`,
                   width: `${Math.max(6, item.width) * viewScale}px`,
-                  height: `${Math.max(6, item.height) * viewScale}px`
+                  height: `${Math.max(6, item.height) * viewScale}px`,
+                  zIndex: item.zIndex + 1
                 }}
                 onMouseDown={(e) => onItemMouseDown(e, item)}
               >
-                {item.type === "text" && <span>{item.text}</span>}
-                {item.type === "barcode" && <span>{item.text}</span>}
+                {item.type === "text" && (
+                  <span
+                    style={
+                      {
+                        transform:
+                          item.orientation === "R"
+                            ? "rotate(90deg)"
+                            : item.orientation === "I"
+                              ? "rotate(180deg)"
+                              : item.orientation === "B"
+                                ? "rotate(270deg)"
+                                : undefined
+                      }
+                    }
+                  >
+                    {item.text}
+                  </span>
+                )}
+                {isBarcodeElementType(item.type) && <BuilderBarcodePreview item={item} />}
+                <span className="builder-item-resize-handle builder-item-resize-handle-right" onMouseDown={(e) => onResizeHandleMouseDown(e, item, "right")} />
+                <span className="builder-item-resize-handle builder-item-resize-handle-bottom" onMouseDown={(e) => onResizeHandleMouseDown(e, item, "bottom")} />
+                <span className="builder-item-resize-handle builder-item-resize-handle-corner" onMouseDown={(e) => onResizeHandleMouseDown(e, item, "corner")} />
               </div>
             ))}
           </div>

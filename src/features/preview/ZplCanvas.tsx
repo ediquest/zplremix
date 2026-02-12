@@ -23,6 +23,7 @@ type PositionMode = "FO" | "FT";
 type BarcodeKind =
   | "none"
   | "code128"
+  | "ean13"
   | "code39"
   | "interleaved2of5"
   | "qr"
@@ -815,6 +816,7 @@ function impactForCommand(command: string): ZplDiagnosticImpact {
     command === "B7"
     || command === "BD"
     || command === "BC"
+    || command === "BE"
     || command === "BX"
     || command === "BQ"
     || command === "FB"
@@ -1762,6 +1764,48 @@ function render2dBarcode(
   }
 }
 
+function normalizeEan13Value(value: string): string {
+  const digits = (value ?? "").replace(/\D/g, "");
+  if (digits.length >= 12) {
+    return digits.slice(0, 13);
+  }
+  return "5901234123457";
+}
+
+function renderEan13Barcode(
+  value: string,
+  barcode: BarcodeState,
+  scale: number,
+  reverse: boolean,
+  addWarning: (message: string) => void
+): HTMLCanvasElement | null {
+  const symbolCanvas = document.createElement("canvas");
+  const text = normalizeEan13Value(value);
+  const symbolScale = Math.max(1, Math.min(8, Math.round(barcode.moduleWidth * scale)));
+  const barHeight = Math.max(8, Math.round((barcode.height * scale) / 6));
+  try {
+    bwipjs.toCanvas(symbolCanvas, {
+      bcid: "ean13",
+      text,
+      scale: symbolScale,
+      height: barHeight,
+      includetext: barcode.showText,
+      textxalign: "center",
+      parse: true,
+      parsefnc: false,
+      paddingwidth: 0,
+      paddingheight: 0,
+      backgroundcolor: "FFFFFF",
+      barcolor: reverse ? "FFFFFF" : "111827"
+    } as unknown as Parameters<typeof bwipjs.toCanvas>[1]);
+    return symbolCanvas;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "Unknown renderer error";
+    addWarning(`Could not render ean13: ${reason}`);
+    return null;
+  }
+}
+
 function buildBarcodeLayout(value: string, barcode: BarcodeState, scale: number): BarcodeLayout {
   const moduleWidth = Math.max(1, barcode.moduleWidth * scale);
   const barHeight = Math.max(24, barcode.height * scale);
@@ -1881,6 +1925,32 @@ function drawBarcodeField(
   reverse: boolean,
   addWarning: (message: string) => void
 ): Rect | null {
+  if (barcode.kind === "ean13") {
+    const symbolCanvas = renderEan13Barcode(value, barcode, scale, reverse, addWarning);
+    if (!symbolCanvas) {
+      return null;
+    }
+    const symbolWidth = symbolCanvas.width;
+    const symbolHeight = symbolCanvas.height;
+    const localAnchor =
+      positionMode === "FO"
+        ? foLocalAnchor(barcode.orientation, symbolWidth, symbolHeight)
+        : { x: 0, y: symbolHeight };
+    drawAtAnchor(ctx, x, y, barcode.orientation, localAnchor.x, localAnchor.y, () => {
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(symbolCanvas, 0, 0, symbolWidth, symbolHeight);
+    });
+    return orientedAabb(
+      x,
+      y,
+      barcode.orientation,
+      localAnchor.x,
+      localAnchor.y,
+      symbolWidth,
+      symbolHeight
+    );
+  }
+
   if (
     barcode.kind === "qr"
     || barcode.kind === "datamatrix"
@@ -2900,6 +2970,22 @@ function drawZplPreview(
         withCheckDigit: (parts[4] ?? "N").toUpperCase() === "Y",
         code128Mode: mode === "U" || mode === "A" ? mode : "N"
       };
+      return;
+    }
+
+    if (command === "BE") {
+      barcode = {
+        ...barcode,
+        kind: "ean13",
+        orientation: parseOrientation(parts[0], defaultOrientation),
+        height: parseNumber(parts[1], barcode.height),
+        showText: (parts[2] ?? "Y").toUpperCase() === "Y",
+        showTextAbove: (parts[3] ?? "N").toUpperCase() === "Y",
+        withCheckDigit: (parts[4] ?? "N").toUpperCase() === "Y"
+      };
+      if (barcode.showTextAbove) {
+        addWarning("^BE text-above is not fully represented in preview.");
+      }
       return;
     }
 
