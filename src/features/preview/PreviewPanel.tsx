@@ -128,6 +128,7 @@ export function PreviewPanel({
   const [canvasRotationDeg, setCanvasRotationDeg] = useState(0);
   const [baseCanvasSize, setBaseCanvasSize] = useState({ width: 0, height: 0 });
   const [previewViewportWidth, setPreviewViewportWidth] = useState(0);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const previewWrapRef = useRef<HTMLDivElement>(null);
   const selectedLabel =
     labels.find((label) => label.id === selectedLabelId) ?? labels[0] ?? null;
@@ -359,6 +360,17 @@ export function PreviewPanel({
         </select>
       </div>
 
+      <section className={`preview-settings-accordion${settingsOpen ? " is-open" : ""}`}>
+        <button
+          type="button"
+          className="preview-settings-toggle"
+          onClick={() => setSettingsOpen((prev) => !prev)}
+          aria-expanded={settingsOpen}
+        >
+          <span>Preview Settings</span>
+          <span className="preview-settings-icon" aria-hidden>{settingsOpen ? "-" : "+"}</span>
+        </button>
+        <div className="preview-settings-body">
       <div className="printer-profile">
         <div className="printer-row">
           <label htmlFor="printer-model">Printer Model:</label>
@@ -574,6 +586,8 @@ export function PreviewPanel({
           </div>
         </div>
       </div>
+        </div>
+      </section>
 
       <div className="preview-wrap" ref={previewWrapRef}>
         {selectedLabel ? (
@@ -601,11 +615,23 @@ export function PreviewPanel({
       {selectedLabel && (
         <div className="preview-toolbar">
           <div className="preview-rotate-actions">
-            <button type="button" className="rotate-btn" onClick={rotatePreviewLeft}>
-              Rotate Left
+            <button
+              type="button"
+              className="rotate-btn rotate-btn-icon"
+              onClick={rotatePreviewLeft}
+              title="Rotate Left"
+              aria-label="Rotate Left"
+            >
+              ↺
             </button>
-            <button type="button" className="rotate-btn" onClick={rotatePreviewRight}>
-              Rotate Right
+            <button
+              type="button"
+              className="rotate-btn rotate-btn-icon"
+              onClick={rotatePreviewRight}
+              title="Rotate Right"
+              aria-label="Rotate Right"
+            >
+              ↻
             </button>
             <button type="button" className="rotate-btn" onClick={() => onOpenBuilder(selectedLabel.zpl)}>
               Open In Builder

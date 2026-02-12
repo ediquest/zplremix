@@ -454,6 +454,19 @@ function tokenizeZplCommands(zpl: string): ZplToken[] {
   return tokens;
 }
 
+function sanitizeLikelyZplSyntaxIssues(zpl: string): { zpl: string; warnings: string[] } {
+  let fixed = zpl;
+  const warnings: string[] = [];
+  const doubledCarets = fixed.match(/\^\^(?=[A-Z@~])/gi);
+  if (doubledCarets?.length) {
+    fixed = fixed.replace(/\^\^(?=[A-Z@~])/gi, "^");
+    warnings.push(
+      `Detected invalid ZPL syntax (${doubledCarets.length}x duplicated "^" before a command, e.g. "^^FS"/"^^F"). Preview auto-corrected it, but the source payload is malformed.`
+    );
+  }
+  return { zpl: fixed, warnings };
+}
+
 function normalizeGraphicName(rawName: string): string {
   let normalized = rawName.trim().toUpperCase();
   if (!normalized) {
@@ -2351,7 +2364,9 @@ function drawZplPreview(
 
   const width = canvas.width;
   const height = canvas.height;
-  const tokens = tokenizeZplCommands(zpl);
+  const sanitized = sanitizeLikelyZplSyntaxIssues(zpl);
+  const workingZpl = sanitized.zpl;
+  const tokens = tokenizeZplCommands(workingZpl);
   const geometry = resolveLabelGeometryWithProfile(tokens, printerSettings, respectZplGeometry);
   const scale = renderOptions.fitToCanvas
     ? Math.min((width - PADDING * 2) / geometry.printWidth, (height - PADDING * 2) / geometry.labelLength)
@@ -2439,6 +2454,7 @@ function drawZplPreview(
   const diagnostics: ZplDiagnostic[] = [];
   const diagnosticKeys = new Set<string>();
   const warningSet = new Set<string>();
+  sanitized.warnings.forEach((message) => warningSet.add(message));
   let activeToken: ZplToken | null = null;
   const addDiagnostic = (
     message: string,
@@ -3402,14 +3418,15 @@ export function renderLabelForExport(
     speedIps: number;
   }
 ): HTMLCanvasElement {
-  const tokens = tokenizeZplCommands(zpl);
+  const workingZpl = sanitizeLikelyZplSyntaxIssues(zpl).zpl;
+  const tokens = tokenizeZplCommands(workingZpl);
   const geometry = resolveLabelGeometryWithProfile(tokens, printerSettings, respectZplGeometry);
   const canvas = document.createElement("canvas");
   canvas.width = Math.max(1, geometry.printWidth);
   canvas.height = Math.max(1, geometry.labelLength);
   drawZplPreview(
     canvas,
-    zpl,
+    workingZpl,
     printerSettings,
     false,
     respectZplGeometry,

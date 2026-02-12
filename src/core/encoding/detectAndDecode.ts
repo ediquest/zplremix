@@ -65,7 +65,13 @@ function extractXmlPayloadCandidates(raw: string): string[] {
     return [];
   }
 
-  const candidates = new Set<string>();
+  const candidates: string[] = [];
+  const pushCandidate = (value: string) => {
+    if (!value) {
+      return;
+    }
+    candidates.push(value);
+  };
   try {
     if (typeof DOMParser !== "undefined") {
       const doc = new DOMParser().parseFromString(raw, "application/xml");
@@ -86,12 +92,12 @@ function extractXmlPayloadCandidates(raw: string): string[] {
             return;
           }
           if (looksLikeZpl(value)) {
-            candidates.add(value);
+            pushCandidate(value);
             return;
           }
           const normalized = normalizeBase64(value);
           if (BASE64_BODY.test(value) && normalized.length >= 12) {
-            candidates.add(value);
+            pushCandidate(value);
           }
         });
       }
@@ -100,7 +106,7 @@ function extractXmlPayloadCandidates(raw: string): string[] {
     // Ignore XML parser failures and continue with regex fallback.
   }
 
-  if (!candidates.size) {
+  if (!candidates.length) {
     const hintTagRe = /<([A-Za-z_][A-Za-z0-9:._-]*)\b[^>]*>([\s\S]*?)<\/\1>/g;
     let match = hintTagRe.exec(raw);
     while (match) {
@@ -117,11 +123,11 @@ function extractXmlPayloadCandidates(raw: string): string[] {
       }
       if (!value.includes("<")) {
         if (looksLikeZpl(value)) {
-          candidates.add(value);
+          pushCandidate(value);
         } else {
           const normalized = normalizeBase64(value);
           if (BASE64_BODY.test(value) && normalized.length >= 12) {
-            candidates.add(value);
+            pushCandidate(value);
           }
         }
       } else {
@@ -131,7 +137,7 @@ function extractXmlPayloadCandidates(raw: string): string[] {
           const nestedValue = nested[1].trim();
           const normalized = normalizeBase64(nestedValue);
           if (BASE64_BODY.test(nestedValue) && normalized.length >= 12) {
-            candidates.add(nestedValue);
+            pushCandidate(nestedValue);
           }
           nested = nestedBlobRe.exec(value);
         }
@@ -140,20 +146,20 @@ function extractXmlPayloadCandidates(raw: string): string[] {
     }
   }
 
-  if (!candidates.size) {
+  if (!candidates.length) {
     const blobRe = />([A-Za-z0-9+/=\r\n\t\s_-]{120,})</g;
     let blob = blobRe.exec(raw);
     while (blob) {
       const value = blob[1].trim();
       const normalized = normalizeBase64(value);
       if (BASE64_BODY.test(value) && normalized.length >= 12) {
-        candidates.add(value);
+        pushCandidate(value);
       }
       blob = blobRe.exec(raw);
     }
   }
 
-  return Array.from(candidates);
+  return candidates;
 }
 
 export function detectAndDecode(raw: string): DetectedInput {
@@ -173,14 +179,25 @@ export function detectAndDecode(raw: string): DetectedInput {
   }
 
   const xmlPayloads = extractXmlPayloadCandidates(raw);
+  const xmlDecoded: DetectedInput[] = [];
   for (const payload of xmlPayloads) {
     if (looksLikeZpl(payload)) {
-      return { mode: "plain", text: payload };
+      xmlDecoded.push({ mode: "plain", text: payload });
+      continue;
     }
     const decoded = tryDecodeAsBase64OrGzip(payload);
     if (decoded) {
-      return decoded;
+      xmlDecoded.push(decoded);
     }
+  }
+  if (xmlDecoded.length === 1) {
+    return xmlDecoded[0];
+  }
+  if (xmlDecoded.length > 1) {
+    return {
+      mode: xmlDecoded[0].mode,
+      text: xmlDecoded.map((item) => item.text).join("\n")
+    };
   }
 
   return { mode: "plain", text: raw };
