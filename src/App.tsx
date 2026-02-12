@@ -18,6 +18,15 @@ const SAMPLE_ZPL = `^XA
 ^FO30,170^BY2,2,80^BCN,80,Y,N,N^FD1234567890^FS
 ^XZ`;
 
+const VISUAL_ZPL_HINT_RE = /\^(FO|FT|FD|FV|GB|GC|GD|GE|GF|XG|BC|BE|B2|B3|BQ|BX|B7|BD|A0|A@|CF|FB)\b/i;
+
+function pickBestInitialLabel(labels: LabelCandidate[]): LabelCandidate | null {
+  if (!labels.length) {
+    return null;
+  }
+  return labels.find((item) => VISUAL_ZPL_HINT_RE.test(item.zpl)) ?? labels[0];
+}
+
 export default function App() {
   const [viewMode, setViewMode] = useState<"main" | "builder">("main");
   const [builderSeedZpl, setBuilderSeedZpl] = useState<string>(SAMPLE_ZPL);
@@ -81,7 +90,8 @@ export default function App() {
       !selectedLabelId ||
       !availableLabels.some((item) => item.id === selectedLabelId)
     ) {
-      setSelectedLabelId(availableLabels[0].id);
+      const initial = pickBestInitialLabel(availableLabels);
+      setSelectedLabelId(initial?.id ?? availableLabels[0].id);
     }
   }, [availableLabels, selectedLabelId]);
 
@@ -95,9 +105,10 @@ export default function App() {
 
   const onZipLabelsDetected = (detected: LabelCandidate[]) => {
     setZipLabels(detected);
-    if (detected.length) {
-      setSelectedLabelId(detected[0].id);
-      setRawInput(detected[0].zpl);
+    const initial = pickBestInitialLabel(detected);
+    if (initial) {
+      setSelectedLabelId(initial.id);
+      setRawInput(initial.zpl);
     }
   };
 

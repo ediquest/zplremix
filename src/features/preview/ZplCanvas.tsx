@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import bwipjs from "bwip-js";
+import pako from "pako";
 import type { PrinterSettings } from "../../core/types";
 
 type ZplCanvasProps = {
@@ -132,7 +133,10 @@ type SerialState = {
   pad: number;
 };
 
-type Code128Token = { type: "char"; value: string } | { type: "fnc1" };
+type Code128Token =
+  | { type: "char"; value: string }
+  | { type: "fnc1" }
+  | { type: "codeset"; value: "A" | "B" | "C" };
 type EncodingMode = "utf-8" | "cp1250" | "cp1252";
 type Gs1FieldDebug = {
   ai: string;
@@ -319,6 +323,10 @@ function resolveEncoding(ciArg: string | undefined): EncodingMode | null {
     return null;
   }
 
+  if (value === "0") {
+    // Zebra default code page in many PRN streams; map to app's legacy single-byte default.
+    return "cp1252";
+  }
   if (value === "28" || value === "utf-8" || value === "utf8") {
     return "utf-8";
   }
@@ -493,14 +501,83 @@ function parseAsciiHexGraphic(
     addWarning(`${context}: graphic data is empty.`);
     return null;
   }
-  if (/[^0-9A-Fa-f]/.test(cleaned)) {
-    addWarning(`${context}: compressed/non-hex graphic data is not supported yet.`);
-    return null;
-  }
 
   const expectedBytes = bytesPerRow * rowCount;
   if (expectedBytes <= 0) {
     addWarning(`${context}: invalid graphic dimensions.`);
+    return null;
+  }
+
+  const ensureExpectedLength = (decoded: Uint8Array): Uint8Array => {
+    const bytes = new Uint8Array(expectedBytes);
+    const copyBytes = Math.min(expectedBytes, decoded.length);
+    bytes.set(decoded.subarray(0, copyBytes), 0);
+    if (decoded.length < expectedBytes) {
+      addWarning(`${context}: graphic payload is shorter than declared size; missing bytes were padded.`);
+    } else if (decoded.length > expectedBytes) {
+      addWarning(`${context}: graphic payload is longer than declared size; extra bytes were ignored.`);
+    }
+    return bytes;
+  };
+
+  const parseZ64Payload = (): Uint8Array | null => {
+    const z64Match = cleaned.match(/^:Z64:([A-Za-z0-9+/=]+):?([0-9A-Fa-f]{4})?:?$/i);
+    if (!z64Match) {
+      addWarning(`${context}: invalid Z64 graphic payload.`);
+      return null;
+    }
+    const compressedBase64 = z64Match[1];
+    const checksumHex = z64Match[2];
+    let compressedBytes: Uint8Array;
+    try {
+      const decoded = atob(compressedBase64);
+      compressedBytes = new Uint8Array(decoded.length);
+      for (let i = 0; i < decoded.length; i += 1) {
+        compressedBytes[i] = decoded.charCodeAt(i);
+      }
+    } catch {
+      addWarning(`${context}: invalid base64 in Z64 graphic payload.`);
+      return null;
+    }
+
+    let inflated: Uint8Array | null = null;
+    try {
+      inflated = pako.inflate(compressedBytes);
+    } catch {
+      try {
+        inflated = pako.inflateRaw(compressedBytes);
+      } catch {
+        inflated = null;
+      }
+    }
+    if (!inflated) {
+      addWarning(`${context}: failed to decompress Z64 payload.`);
+      return null;
+    }
+
+    if (checksumHex) {
+      let crc = 0xffff;
+      for (let i = 0; i < inflated.length; i += 1) {
+        crc ^= inflated[i] << 8;
+        for (let bit = 0; bit < 8; bit += 1) {
+          crc = (crc & 0x8000) !== 0 ? ((crc << 1) ^ 0x1021) : (crc << 1);
+          crc &= 0xffff;
+        }
+      }
+      const computed = crc.toString(16).toUpperCase().padStart(4, "0");
+      if (computed !== checksumHex.toUpperCase()) {
+        addWarning(`${context}: Z64 checksum mismatch (expected ${checksumHex.toUpperCase()}, got ${computed}).`);
+      }
+    }
+
+    return ensureExpectedLength(inflated);
+  };
+
+  if (cleaned.startsWith(":Z64:")) {
+    return parseZ64Payload();
+  }
+  if (/[^0-9A-Fa-f]/.test(cleaned)) {
+    addWarning(`${context}: compressed/non-hex graphic data is not supported yet.`);
     return null;
   }
 
@@ -509,20 +586,13 @@ function parseAsciiHexGraphic(
     addWarning(`${context}: odd-length hex payload; the last nibble was ignored.`);
   }
   const decodedBytes = Math.floor(usableHexLength / 2);
-  const bytes = new Uint8Array(expectedBytes);
-  const copyBytes = Math.min(expectedBytes, decodedBytes);
+  const parsed = new Uint8Array(decodedBytes);
 
-  for (let i = 0; i < copyBytes; i += 1) {
-    bytes[i] = Number.parseInt(cleaned.slice(i * 2, i * 2 + 2), 16);
+  for (let i = 0; i < decodedBytes; i += 1) {
+    parsed[i] = Number.parseInt(cleaned.slice(i * 2, i * 2 + 2), 16);
   }
 
-  if (decodedBytes < expectedBytes) {
-    addWarning(`${context}: graphic payload is shorter than declared size; missing bytes were padded.`);
-  } else if (decodedBytes > expectedBytes) {
-    addWarning(`${context}: graphic payload is longer than declared size; extra bytes were ignored.`);
-  }
-
-  return bytes;
+  return ensureExpectedLength(parsed);
 }
 
 function parseGraphicField(
@@ -1289,12 +1359,15 @@ function code128PatternForChar(charCode: number): number[] {
   return CODE128_PATTERNS[normalized].split("").map((item) => Number(item));
 }
 
-function code128ValueForChar(char: string): number {
+function code128ValueForChar(char: string, set: "A" | "B"): number {
   const charCode = char.charCodeAt(0);
-  if (charCode >= 32 && charCode <= 127) {
+  if (set === "B" && charCode >= 32 && charCode <= 127) {
     return charCode - 32;
   }
-  return "?".charCodeAt(0) - 32;
+  if (set === "A" && charCode <= 95) {
+    return charCode;
+  }
+  return set === "A" ? "?".charCodeAt(0) : "?".charCodeAt(0) - 32;
 }
 
 function sanitizeCode128Char(char: string): string {
@@ -1319,9 +1392,24 @@ function tokenizeCode128Segment(value: string): { tokens: Code128Token[]; printa
       i += 1;
       continue;
     }
-    // Zebra control prefix used in ^FD for Code128 (e.g. ">:").
-    // It should not be rendered as human-readable text.
+    // Zebra control prefixes used in ^FD for Code128.
     if (current === ">" && next === ":") {
+      tokens.push({ type: "codeset", value: "B" });
+      i += 1;
+      continue;
+    }
+    if (current === ">" && next === ";") {
+      tokens.push({ type: "codeset", value: "C" });
+      i += 1;
+      continue;
+    }
+    if (current === ">" && next === "9") {
+      tokens.push({ type: "codeset", value: "A" });
+      i += 1;
+      continue;
+    }
+    if (current === ">" && next === "6") {
+      tokens.push({ type: "codeset", value: "B" });
       i += 1;
       continue;
     }
@@ -1471,13 +1559,21 @@ function countDigitRun(
 function encodeCode128(value: string, mode: "N" | "U" | "A"): { codes: number[]; printable: string } {
   const parsed = parseCode128Input(value, mode);
   const tokens = parsed.tokens;
+  const startCodeA = 103;
   const startCodeB = 104;
+  const startCodeC = 105;
+  const codeSetA = 101;
   const codeSetB = 100;
   const codeSetC = 99;
   const fnc1 = 102;
   const dataCodes: number[] = [];
-  let activeSet: "B" | "C" = "B";
+  let startSet: "A" | "B" | "C" = "B";
   let index = 0;
+  while (index < tokens.length && tokens[index]?.type === "codeset") {
+    startSet = (tokens[index] as { type: "codeset"; value: "A" | "B" | "C" }).value;
+    index += 1;
+  }
+  let activeSet: "A" | "B" | "C" = startSet;
 
   if (mode === "U" || mode === "A") {
     dataCodes.push(fnc1);
@@ -1485,19 +1581,39 @@ function encodeCode128(value: string, mode: "N" | "U" | "A"): { codes: number[];
 
   while (index < tokens.length) {
     const token = tokens[index];
+    if (token.type === "codeset") {
+      if (token.value !== activeSet) {
+        dataCodes.push(token.value === "A" ? codeSetA : token.value === "B" ? codeSetB : codeSetC);
+        activeSet = token.value;
+      }
+      index += 1;
+      continue;
+    }
     if (token.type === "fnc1") {
       dataCodes.push(fnc1);
       index += 1;
       continue;
     }
 
+    if (activeSet === "C") {
+      const left = tokens[index];
+      const right = tokens[index + 1];
+      const leftDigit = left?.type === "char" && left.value >= "0" && left.value <= "9";
+      const rightDigit = right?.type === "char" && right.value >= "0" && right.value <= "9";
+      if (leftDigit && rightDigit) {
+        dataCodes.push(Number(`${left.value}${right.value}`));
+        index += 2;
+        continue;
+      }
+      dataCodes.push(codeSetB);
+      activeSet = "B";
+    }
+
     const digitRun = countDigitRun(tokens, index);
     const canUseSetC = mode !== "N" && digitRun >= 4;
     if (canUseSetC) {
-      if (activeSet !== "C") {
-        dataCodes.push(codeSetC);
-        activeSet = "C";
-      }
+      dataCodes.push(codeSetC);
+      activeSet = "C";
       let pairCount = Math.floor(digitRun / 2);
       while (pairCount > 0) {
         const left = tokens[index];
@@ -1512,21 +1628,26 @@ function encodeCode128(value: string, mode: "N" | "U" | "A"): { codes: number[];
       continue;
     }
 
-    if (activeSet !== "B") {
+    if (activeSet !== "B" && activeSet !== "A") {
       dataCodes.push(codeSetB);
       activeSet = "B";
     }
-    dataCodes.push(code128ValueForChar(token.value));
+    if (activeSet === "A") {
+      dataCodes.push(code128ValueForChar(token.value, "A"));
+    } else {
+      dataCodes.push(code128ValueForChar(token.value, "B"));
+    }
     index += 1;
   }
 
-  let checksum = startCodeB;
+  const startCode = startSet === "A" ? startCodeA : startSet === "C" ? startCodeC : startCodeB;
+  let checksum = startCode;
   dataCodes.forEach((code, position) => {
     checksum += code * (position + 1);
   });
   checksum %= 103;
   return {
-    codes: [startCodeB, ...dataCodes, checksum, 106],
+    codes: [startCode, ...dataCodes, checksum, 106],
     printable: parsed.printable
   };
 }
@@ -2437,6 +2558,7 @@ function drawZplPreview(
   let labelHomeY = 0;
   let labelTop = 0;
   let labelShift = 0;
+  let labelReverse = false;
   let printWidth = geometry.printWidth;
   let labelLength = geometry.labelLength;
   let printEngine: PrintEngineState = { darkness: 0, speedIps: 4 };
@@ -2723,10 +2845,23 @@ function drawZplPreview(
       return;
     }
 
+    if (command === "LR") {
+      labelReverse = (parts[0] ?? "N").trim().toUpperCase() === "Y";
+      return;
+    }
+
     if (command === "MD") {
       printEngine = {
         ...printEngine,
         darkness: clamp(parseInteger(parts[0], printEngine.darkness), -30, 30)
+      };
+      return;
+    }
+
+    if (command === "SD" && token.prefix === "~") {
+      printEngine = {
+        ...printEngine,
+        darkness: clamp(parseInteger(parts[0], printEngine.darkness), 0, 30)
       };
       return;
     }
@@ -2958,6 +3093,19 @@ function drawZplPreview(
         return;
       }
       encoding = nextEncoding;
+      return;
+    }
+
+    if (
+      command === "TA"
+      || command === "JS"
+      || command === "MN"
+      || command === "MT"
+      || command === "PM"
+      || command === "JM"
+      || command === "JU"
+    ) {
+      // Printer/session setup commands from PRN headers; ignored in canvas preview.
       return;
     }
 
@@ -3379,6 +3527,9 @@ function drawZplPreview(
   });
 
   ctx.restore();
+  if (labelReverse) {
+    invertRect(ctx, labelRect.x, labelRect.y, labelRect.width, labelRect.height);
+  }
   const effectiveEngine =
     printEngineOverride?.enabled
       ? {
@@ -3475,6 +3626,9 @@ export function ZplCanvas({
     }
     if (onDiagnosticsChange) {
       onDiagnosticsChange(result.diagnostics);
+    }
+    if (onCanvasReady) {
+      onCanvasReady(canvas);
     }
   }, [
     onCode128DebugChange,

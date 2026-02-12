@@ -156,7 +156,7 @@ export function ZipUpload({ onLabelsDetected }: ZipUploadProps) {
           onSelectFile(event.dataTransfer.files?.[0]);
         }}
       >
-        <p className="zip-drop-title">Drop ZIP/XML/ZPL/TXT here</p>
+        <p className="zip-drop-title">Drop ZIP/XML/ZPL/TXT/PRN here</p>
         <p className="zip-drop-subtitle">or click to browse</p>
         <button
           type="button"

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { jsPDF } from "jspdf";
 import type { LabelCandidate, PrinterSettings, PrintDensityDpmm, PrintQuality, LabelUnit } from "../../core/types";
 import { ZplCanvas, renderLabelForExport } from "./ZplCanvas";
@@ -128,6 +128,7 @@ export function PreviewPanel({
   const [canvasRotationDeg, setCanvasRotationDeg] = useState(0);
   const [baseCanvasSize, setBaseCanvasSize] = useState({ width: 0, height: 0 });
   const [previewViewportWidth, setPreviewViewportWidth] = useState(0);
+  const [previewViewportHeight, setPreviewViewportHeight] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const previewWrapRef = useRef<HTMLDivElement>(null);
   const selectedLabel =
@@ -208,11 +209,14 @@ export function PreviewPanel({
 
   const fileSafeName = (selectedLabel?.source ?? "label").replace(/[^a-z0-9_-]/gi, "_");
   const baseName = `${fileSafeName}_${selectedLabel?.index ?? 1}`;
-  const printEngineOverride = {
-    enabled: printEngineOverrideEnabled,
-    darkness: printEngineDarkness,
-    speedIps: printEngineSpeedIps
-  };
+  const printEngineOverride = useMemo(
+    () => ({
+      enabled: printEngineOverrideEnabled,
+      darkness: printEngineDarkness,
+      speedIps: printEngineSpeedIps
+    }),
+    [printEngineOverrideEnabled, printEngineDarkness, printEngineSpeedIps]
+  );
 
   const saveBlob = (blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob);
@@ -292,13 +296,23 @@ export function PreviewPanel({
   const isQuarterTurn = canvasRotationDeg % 180 !== 0;
   const stageWidth = isQuarterTurn ? baseCanvasSize.height : baseCanvasSize.width;
   const stageHeight = isQuarterTurn ? baseCanvasSize.width : baseCanvasSize.height;
-  const fitScale =
+  const widthScale =
     stageWidth > 0 && previewViewportWidth > 0
-      ? Math.min(1, previewViewportWidth / stageWidth)
+      ? previewViewportWidth / stageWidth
       : 1;
-  const previewStageStyle =
+  const heightScale =
+    stageHeight > 0 && previewViewportHeight > 0
+      ? previewViewportHeight / stageHeight
+      : 1;
+  const fitScale =
     stageWidth > 0 && stageHeight > 0
-      ? { width: `${stageWidth}px`, height: `${stageHeight}px` }
+      ? Math.min(1, widthScale, heightScale)
+      : 1;
+  const scaledStageWidth = stageWidth > 0 ? Math.max(1, Math.round(stageWidth * fitScale)) : 0;
+  const scaledStageHeight = stageHeight > 0 ? Math.max(1, Math.round(stageHeight * fitScale)) : 0;
+  const previewStageStyle =
+    scaledStageWidth > 0 && scaledStageHeight > 0
+      ? { width: `${scaledStageWidth}px`, height: `${scaledStageHeight}px` }
       : undefined;
 
   useEffect(() => {
@@ -311,29 +325,32 @@ export function PreviewPanel({
       const paddingLeft = Number.parseFloat(computed.paddingLeft) || 0;
       const paddingRight = Number.parseFloat(computed.paddingRight) || 0;
       const innerWidth = Math.max(0, node.clientWidth - paddingLeft - paddingRight);
+      const maxHeight = Math.max(320, Math.floor(window.innerHeight * 0.7));
       setPreviewViewportWidth((prev) => (Math.abs(prev - innerWidth) < 0.5 ? prev : innerWidth));
+      setPreviewViewportHeight((prev) => (Math.abs(prev - maxHeight) < 0.5 ? prev : maxHeight));
     };
     update();
     const observer = new ResizeObserver(update);
     observer.observe(node);
-    return () => observer.disconnect();
+    window.addEventListener("resize", update);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", update);
+    };
   }, []);
 
   const handleCanvasReady = useCallback((canvas: HTMLCanvasElement | null) => {
     if (!canvas) {
+      setBaseCanvasSize({ width: 0, height: 0 });
       return;
     }
-    const update = () => {
-      const rect = canvas.getBoundingClientRect();
-      const nextWidth = Math.max(1, Math.round(rect.width));
-      const nextHeight = Math.max(1, Math.round(rect.height));
-      setBaseCanvasSize((prev) =>
-        prev.width === nextWidth && prev.height === nextHeight
-          ? prev
-          : { width: nextWidth, height: nextHeight }
-      );
-    };
-    requestAnimationFrame(update);
+    const nextWidth = Math.max(1, Math.round(canvas.width));
+    const nextHeight = Math.max(1, Math.round(canvas.height));
+    setBaseCanvasSize((prev) =>
+      prev.width === nextWidth && prev.height === nextHeight
+        ? prev
+        : { width: nextWidth, height: nextHeight }
+    );
   }, []);
 
   return (

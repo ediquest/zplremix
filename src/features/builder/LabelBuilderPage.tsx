@@ -7,6 +7,7 @@ type LabelBuilderPageProps = {
 };
 
 type BuilderElementType =
+  | "passthrough"
   | "text"
   | "code128"
   | "gs1128"
@@ -41,6 +42,13 @@ type BuilderItem = {
   zIndex: number;
   font: ZplFont;
   orientation: ZplOrientation;
+  sourceCommand?: "FO" | "FT";
+  sourceBody?: string;
+  sourceAnchorX?: number;
+  sourceAnchorY?: number;
+  sourceViewX?: number;
+  sourceViewY?: number;
+  sourceFingerprint?: string;
 };
 
 type ResizeState = {
@@ -213,25 +221,74 @@ function normalizeOrientation(value: string | undefined): ZplOrientation {
   return orientation === "R" || orientation === "I" || orientation === "B" ? orientation : "N";
 }
 
-function orientationToDeg(orientation: ZplOrientation): number {
-  if (orientation === "R") {
-    return 90;
+function parseZplCommandArgs(body: string, command: string): string[] {
+  const re = new RegExp(`\\^${command}([^\\^]*)`, "i");
+  const match = re.exec(body);
+  if (!match) {
+    return [];
   }
-  if (orientation === "I") {
-    return 180;
-  }
-  if (orientation === "B") {
-    return 270;
-  }
-  return 0;
+  return (match[1] ?? "").split(",");
 }
 
-function parseLabelBoundsFromZpl(zpl: string): { width: number; height: number } {
-  const pw = /\^PW(\d+)/i.exec(zpl);
-  const ll = /\^LL(\d+)/i.exec(zpl);
-  const width = Math.max(100, Number(pw?.[1] ?? 812));
-  const height = Math.max(100, Number(ll?.[1] ?? 1218));
-  return { width, height };
+function parseBarcodeHeight(args: string[], fallback = 100): number {
+  const raw = Number(args[1] ?? "");
+  if (Number.isFinite(raw) && raw > 0) {
+    return Math.max(40, Math.round(raw));
+  }
+  return Math.max(40, Math.round(fallback));
+}
+
+function parseGraphicFieldSize(body: string): { width: number; height: number } | null {
+  const args = parseZplCommandArgs(body, "GF");
+  if (!args.length) {
+    return null;
+  }
+  const offset = Number.isFinite(Number(args[0])) ? 0 : 1;
+  const totalBytes = Math.max(0, Number.parseInt(args[offset] ?? "", 10));
+  const usedBytes = Math.max(0, Number.parseInt(args[offset + 1] ?? "", 10));
+  const bytesPerRow = Math.max(0, Number.parseInt(args[offset + 2] ?? "", 10));
+  if (bytesPerRow <= 0) {
+    return null;
+  }
+  const rowCount = Math.max(1, Math.ceil((usedBytes || totalBytes || bytesPerRow) / bytesPerRow));
+  return {
+    width: Math.max(8, bytesPerRow * 8),
+    height: Math.max(8, rowCount)
+  };
+}
+
+function stripCode128ControlSequences(value: string): string {
+  return (value ?? "").replace(/>([:;689])/g, "");
+}
+
+function estimateLinearBarcodeWidthDots(type: BuilderElementType, rawValue: string, moduleWidth: number): number {
+  const safeModule = Math.max(1, moduleWidth);
+  if (type === "ean13") {
+    return Math.max(140, Math.round((95 + 20) * safeModule));
+  }
+  if (type === "itf14") {
+    const digits = (rawValue ?? "").replace(/\D/g, "");
+    const pairs = Math.max(1, Math.ceil(digits.length / 2));
+    return Math.max(140, Math.round((pairs * 14 + 24) * safeModule));
+  }
+  if (type === "code39") {
+    const chars = Math.max(1, (rawValue ?? "").length + 2);
+    return Math.max(140, Math.round((chars * 16 + 16) * safeModule));
+  }
+  const code128Chars = Math.max(1, stripCode128ControlSequences(rawValue).length);
+  return Math.max(160, Math.round((code128Chars * 11 + 70) * safeModule));
+}
+
+function buildItemFingerprint(item: BuilderItem): string {
+  return [
+    item.type,
+    item.text,
+    Math.round(item.width),
+    Math.round(item.height),
+    item.orientation,
+    item.font,
+    item.filled ? "1" : "0"
+  ].join("|");
 }
 
 function getLastOrientationFromFw(segment: string): ZplOrientation {
@@ -251,33 +308,66 @@ function getFieldOrientationFromFormat(zpl: string, fieldStartIndex: number, bod
   return fromBody !== "N" ? fromBody : fromBefore;
 }
 
+function rotatePointForOrientation(x: number, y: number, orientation: ZplOrientation): { x: number; y: number } {
+  if (orientation === "R") {
+    return { x: -y, y: x };
+  }
+  if (orientation === "I") {
+    return { x: -x, y: -y };
+  }
+  if (orientation === "B") {
+    return { x: y, y: -x };
+  }
+  return { x, y };
+}
+
+function foLocalAnchorForOrientation(
+  orientation: ZplOrientation,
+  width: number,
+  height: number
+): { x: number; y: number } {
+  if (orientation === "R") {
+    return { x: 0, y: height };
+  }
+  if (orientation === "I") {
+    return { x: width, y: height };
+  }
+  if (orientation === "B") {
+    return { x: width, y: 0 };
+  }
+  return { x: 0, y: 0 };
+}
+
 function mapFieldPosition(
   command: "FO" | "FT",
-  x: number,
-  y: number,
+  anchorX: number,
+  anchorY: number,
   width: number,
   height: number,
-  orientation: ZplOrientation,
-  labelWidth: number,
-  labelHeight: number
-): { x: number; y: number } {
-  const baseX = x;
-  const baseY = command === "FT" ? y - height : y;
-  let mappedX = baseX;
-  let mappedY = baseY;
-  if (orientation === "R") {
-    mappedX = baseY;
-    mappedY = labelHeight - baseX - height;
-  } else if (orientation === "I") {
-    mappedX = labelWidth - baseX - width;
-    mappedY = labelHeight - baseY - height;
-  } else if (orientation === "B") {
-    mappedX = labelWidth - baseY - width;
-    mappedY = baseX;
-  }
+  orientation: ZplOrientation
+): { x: number; y: number; width: number; height: number } {
+  const localAnchor =
+    command === "FO"
+      ? foLocalAnchorForOrientation(orientation, width, height)
+      : { x: 0, y: height };
+  const rotatedAnchor = rotatePointForOrientation(localAnchor.x, localAnchor.y, orientation);
+  const tx = anchorX - rotatedAnchor.x;
+  const ty = anchorY - rotatedAnchor.y;
+  const corners = [
+    rotatePointForOrientation(0, 0, orientation),
+    rotatePointForOrientation(width, 0, orientation),
+    rotatePointForOrientation(width, height, orientation),
+    rotatePointForOrientation(0, height, orientation)
+  ];
+  const minX = Math.min(...corners.map((point) => tx + point.x));
+  const maxX = Math.max(...corners.map((point) => tx + point.x));
+  const minY = Math.min(...corners.map((point) => ty + point.y));
+  const maxY = Math.max(...corners.map((point) => ty + point.y));
   return {
-    x: clamp(mappedX, 0, Math.max(0, labelWidth - Math.max(1, width))),
-    y: clamp(mappedY, 0, Math.max(0, labelHeight - Math.max(1, height)))
+    x: Math.max(0, Math.round(minX)),
+    y: Math.max(0, Math.round(minY)),
+    width: Math.max(1, Math.round(maxX - minX)),
+    height: Math.max(1, Math.round(maxY - minY))
   };
 }
 
@@ -329,6 +419,30 @@ function buildZplFromItems(items: BuilderItem[], canvasWidth: number, canvasHeig
   [...items].sort((a, b) => a.zIndex - b.zIndex).forEach((item) => {
     const x = Math.round(item.x);
     const y = Math.round(item.y);
+    const canReuseSource =
+      !!item.sourceCommand
+      && typeof item.sourceBody === "string"
+      && item.sourceFingerprint === buildItemFingerprint(item)
+      && Number.isFinite(item.sourceAnchorX)
+      && Number.isFinite(item.sourceAnchorY)
+      && Number.isFinite(item.sourceViewX)
+      && Number.isFinite(item.sourceViewY);
+    if (canReuseSource) {
+      const dx = Math.round(item.x - (item.sourceViewX ?? item.x));
+      const dy = Math.round(item.y - (item.sourceViewY ?? item.y));
+      const nextX = Math.max(0, Math.round((item.sourceAnchorX ?? x) + dx));
+      const nextY = Math.max(0, Math.round((item.sourceAnchorY ?? y) + dy));
+      lines.push(`^${item.sourceCommand}${nextX},${nextY}${item.sourceBody}^FS`);
+      return;
+    }
+    if (item.type === "passthrough") {
+      if (item.sourceCommand && item.sourceBody && Number.isFinite(item.sourceAnchorX) && Number.isFinite(item.sourceAnchorY)) {
+        const sourceX = item.sourceAnchorX ?? x;
+        const sourceY = item.sourceAnchorY ?? y;
+        lines.push(`^${item.sourceCommand}${Math.round(sourceX)},${Math.round(sourceY)}${item.sourceBody}^FS`);
+      }
+      return;
+    }
     if (item.type === "text") {
       const textHeight = Math.max(14, Math.round(item.height * 0.8));
       const textWidth = Math.max(10, Math.round(textHeight * 0.6));
@@ -429,6 +543,36 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
       continue;
     }
     const fieldOrientation = getFieldOrientationFromFormat(zpl, match.index, body);
+    const pushParsed = (item: BuilderItem) => {
+      items.push({
+        ...item,
+        sourceCommand: command,
+        sourceBody: body,
+        sourceAnchorX: rawX,
+        sourceAnchorY: rawY,
+        sourceViewX: item.x,
+        sourceViewY: item.y,
+        sourceFingerprint: buildItemFingerprint(item)
+      });
+    };
+
+    if (/\^GF/i.test(body)) {
+      const gfSize = parseGraphicFieldSize(body) ?? { width: 64, height: 16 };
+      pushParsed({
+        id: crypto.randomUUID(),
+        type: "passthrough",
+        x: rawX,
+        y: rawY,
+        width: gfSize.width,
+        height: gfSize.height,
+        text: "",
+        filled: false,
+        zIndex: items.length,
+        font: "0",
+        orientation: fieldOrientation
+      });
+      continue;
+    }
 
     const gb = /\^GB(\d+),(\d+)(?:,(\d+))?/i.exec(body);
     if (gb) {
@@ -436,7 +580,7 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
       const height = Math.max(2, Number(gb[2]));
       const border = Number(gb[3] ?? 1);
       const isFilled = border >= Math.min(width, height) - 1;
-      items.push({
+      pushParsed({
         id: crypto.randomUUID(),
         type: height <= 6 || width <= 6 || border <= 1 ? (height >= width ? "line-v" : "line") : "box",
         x: rawX,
@@ -456,7 +600,7 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
     if (gc) {
       const diameter = Math.max(8, Number(gc[1]));
       const border = Number(gc[2] ?? 2);
-      items.push({
+      pushParsed({
         id: crypto.randomUUID(),
         type: "circle",
         x: rawX,
@@ -477,7 +621,7 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
       const width = Math.max(8, Number(ge[1]));
       const height = Math.max(8, Number(ge[2]));
       const border = Number(ge[3] ?? 2);
-      items.push({
+      pushParsed({
         id: crypto.randomUUID(),
         type: "ellipse",
         x: rawX,
@@ -498,7 +642,7 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
       const width = Math.max(8, Number(gd[1]));
       const height = Math.max(8, Number(gd[2]));
       const direction = (gd[4] ?? "R").toUpperCase() === "L" ? "L" : "R";
-      items.push({
+      pushParsed({
         id: crypto.randomUUID(),
         type: "line-d",
         x: rawX,
@@ -521,7 +665,7 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
       const orientation = normalizeOrientation(bqn?.[1]);
       const magnification = clamp(Number(bqn?.[2] ?? 3), 1, 12);
       const qrSize = estimateQrBoxSize(payload, magnification);
-      items.push({
+      pushParsed({
         id: crypto.randomUUID(),
         type: "qr",
         x: rawX + QR_COMPAT_OFFSET_X,
@@ -541,7 +685,7 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
       const fd = /\^FD([^\\^]*)/i.exec(body);
       const bx = /\^BX([NRIB])?/i.exec(body);
       const orientation = normalizeOrientation(bx?.[1] ?? fieldOrientation);
-      items.push({
+      pushParsed({
         id: crypto.randomUUID(),
         type: "datamatrix",
         x: rawX,
@@ -559,17 +703,30 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
 
     if (/\^BE/i.test(body)) {
       const fd = /\^FD([^\\^]*)/i.exec(body);
-      const be = /\^BE([NRIB])?,(\d+)/i.exec(body);
-      const barHeight = Math.max(40, Number(be?.[2] ?? 100));
-      const orientation = normalizeOrientation(be?.[1] ?? fieldOrientation);
-      items.push({
+      const byArgs = parseZplCommandArgs(body, "BY");
+      const byModule = clamp(Number(byArgs[0] ?? 2), 1, 10);
+      const byHeight = parseBarcodeHeight(["", byArgs[2] ?? ""], 100);
+      const beArgs = parseZplCommandArgs(body, "BE");
+      const orientation = normalizeOrientation(beArgs[0] || fieldOrientation);
+      const barHeight = parseBarcodeHeight(beArgs, byHeight);
+      const payload = fd?.[1] ?? "5901234123457";
+      const estimatedWidth = estimateLinearBarcodeWidthDots("ean13", payload, byModule);
+      const position = mapFieldPosition(
+        command,
+        rawX,
+        rawY,
+        estimatedWidth,
+        barHeight,
+        orientation
+      );
+      pushParsed({
         id: crypto.randomUUID(),
         type: "ean13",
-        x: rawX,
-        y: rawY,
-        width: 260,
-        height: barHeight,
-        text: fd?.[1] ?? "5901234123457",
+        x: position.x,
+        y: position.y,
+        width: position.width,
+        height: position.height,
+        text: payload,
         filled: false,
         zIndex: items.length,
         font: "0",
@@ -580,19 +737,27 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
 
     if (/\^B7/i.test(body)) {
       const fd = /\^FD([^\\^]*)/i.exec(body);
-      const b7 = /\^B7([NRIB])?,(\d+),(\d+)/i.exec(body);
-      const colWidth = Number(b7?.[2] ?? 4);
-      const rows = Number(b7?.[3] ?? 6);
+      const b7Args = parseZplCommandArgs(body, "B7");
+      const orientation = normalizeOrientation(b7Args[0] || fieldOrientation);
+      const colWidth = Number(b7Args[1] ?? 4);
+      const rows = Number(b7Args[2] ?? 6);
       const width = Math.max(160, colWidth * 42);
       const height = Math.max(64, rows * 16);
-      const orientation = normalizeOrientation(b7?.[1] ?? fieldOrientation);
-      items.push({
-        id: crypto.randomUUID(),
-        type: "pdf417",
-        x: rawX,
-        y: rawY,
+      const position = mapFieldPosition(
+        command,
+        rawX,
+        rawY,
         width,
         height,
+        orientation
+      );
+      pushParsed({
+        id: crypto.randomUUID(),
+        type: "pdf417",
+        x: position.x,
+        y: position.y,
+        width: position.width,
+        height: position.height,
         text: fd?.[1] ?? "PDF417 SAMPLE DATA",
         filled: false,
         zIndex: items.length,
@@ -604,17 +769,30 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
 
     if (/\^B2/i.test(body)) {
       const fd = /\^FD([^\\^]*)/i.exec(body);
-      const b2 = /\^B2([NRIB])?,(\d+)/i.exec(body);
-      const barHeight = Math.max(40, Number(b2?.[2] ?? 100));
-      const orientation = normalizeOrientation(b2?.[1] ?? fieldOrientation);
-      items.push({
+      const byArgs = parseZplCommandArgs(body, "BY");
+      const byModule = clamp(Number(byArgs[0] ?? 2), 1, 10);
+      const byHeight = parseBarcodeHeight(["", byArgs[2] ?? ""], 100);
+      const b2Args = parseZplCommandArgs(body, "B2");
+      const orientation = normalizeOrientation(b2Args[0] || fieldOrientation);
+      const barHeight = parseBarcodeHeight(b2Args, byHeight);
+      const payload = fd?.[1] ?? "01234567890123";
+      const estimatedWidth = estimateLinearBarcodeWidthDots("itf14", payload, byModule);
+      const position = mapFieldPosition(
+        command,
+        rawX,
+        rawY,
+        estimatedWidth,
+        barHeight,
+        orientation
+      );
+      pushParsed({
         id: crypto.randomUUID(),
         type: "itf14",
-        x: rawX,
-        y: rawY,
-        width: 280,
-        height: barHeight,
-        text: fd?.[1] ?? "01234567890123",
+        x: position.x,
+        y: position.y,
+        width: position.width,
+        height: position.height,
+        text: payload,
         filled: false,
         zIndex: items.length,
         font: "0",
@@ -625,17 +803,30 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
 
     if (/\^B3/i.test(body)) {
       const fd = /\^FD([^\\^]*)/i.exec(body);
-      const b3 = /\^B3([NRIB])?,[^,]*,(\d+)/i.exec(body);
-      const barHeight = Math.max(40, Number(b3?.[2] ?? 100));
-      const orientation = normalizeOrientation(b3?.[1] ?? fieldOrientation);
-      items.push({
+      const byArgs = parseZplCommandArgs(body, "BY");
+      const byModule = clamp(Number(byArgs[0] ?? 2), 1, 10);
+      const byHeight = parseBarcodeHeight(["", byArgs[2] ?? ""], 100);
+      const b3Args = parseZplCommandArgs(body, "B3");
+      const orientation = normalizeOrientation(b3Args[0] || fieldOrientation);
+      const barHeight = parseBarcodeHeight(["", b3Args[2] ?? ""], byHeight);
+      const payload = fd?.[1] ?? "CODE39-123";
+      const estimatedWidth = estimateLinearBarcodeWidthDots("code39", payload, byModule);
+      const position = mapFieldPosition(
+        command,
+        rawX,
+        rawY,
+        estimatedWidth,
+        barHeight,
+        orientation
+      );
+      pushParsed({
         id: crypto.randomUUID(),
         type: "code39",
-        x: rawX,
-        y: rawY,
-        width: 280,
-        height: barHeight,
-        text: fd?.[1] ?? "CODE39-123",
+        x: position.x,
+        y: position.y,
+        width: position.width,
+        height: position.height,
+        text: payload,
         filled: false,
         zIndex: items.length,
         font: "0",
@@ -646,17 +837,29 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
 
     if (/\^BC/i.test(body)) {
       const fd = /\^FD([^\\^]*)/i.exec(body);
-      const bc = /\^BC([NRIB])?,(\d+)/i.exec(body);
-      const barHeight = Math.max(40, Number(bc?.[2] ?? 100));
+      const byArgs = parseZplCommandArgs(body, "BY");
+      const byModule = clamp(Number(byArgs[0] ?? 2), 1, 10);
+      const byHeight = parseBarcodeHeight(["", byArgs[2] ?? ""], 100);
+      const bcArgs = parseZplCommandArgs(body, "BC");
+      const orientation = normalizeOrientation(bcArgs[0] || fieldOrientation);
+      const barHeight = parseBarcodeHeight(bcArgs, byHeight);
       const payload = fd?.[1] ?? "1234567890";
-      const orientation = normalizeOrientation(bc?.[1] ?? fieldOrientation);
-      items.push({
+      const estimatedWidth = estimateLinearBarcodeWidthDots("code128", payload, byModule);
+      const position = mapFieldPosition(
+        command,
+        rawX,
+        rawY,
+        estimatedWidth,
+        barHeight,
+        orientation
+      );
+      pushParsed({
         id: crypto.randomUUID(),
         type: payload.startsWith(">8") ? "gs1128" : "code128",
-        x: rawX,
-        y: rawY,
-        width: 280,
-        height: barHeight,
+        x: position.x,
+        y: position.y,
+        width: position.width,
+        height: position.height,
         text: payload,
         filled: false,
         zIndex: items.length,
@@ -674,14 +877,21 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
       const h = Number(a?.[3] || 32);
       const width = estimateTextBoxWidth(fd[1], h);
       const height = Math.max(24, Math.round(h * 1.2));
-      const y = command === "FT" ? rawY - height : rawY;
-      items.push({
-        id: crypto.randomUUID(),
-        type: "text",
-        x: rawX,
-        y,
+      const position = mapFieldPosition(
+        command,
+        rawX,
+        rawY,
         width,
         height,
+        orientation
+      );
+      pushParsed({
+        id: crypto.randomUUID(),
+        type: "text",
+        x: position.x,
+        y: position.y,
+        width: position.width,
+        height: position.height,
         text: fd[1],
         filled: false,
         zIndex: items.length,
@@ -753,7 +963,6 @@ function estimateQrBoxSize(text: string, magnification: number): { width: number
 
 function BuilderBarcodePreview({ item }: { item: BuilderItem }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const rotation = orientationToDeg(item.orientation);
 
   useEffect(() => {
     if (!canvasRef.current || !isBarcodeElementType(item.type)) {
@@ -767,12 +976,19 @@ function BuilderBarcodePreview({ item }: { item: BuilderItem }) {
       const options: Record<string, string | number | boolean> = {
         text: item.text || "0",
         scale: 2,
-        includetext: item.type !== "qr" && item.type !== "datamatrix" && item.type !== "pdf417",
+        includetext: false,
         paddingwidth: 0,
         paddingheight: 0,
         backgroundcolor: "FFFFFF",
         barcolor: "111827"
       };
+      if (item.orientation === "R") {
+        options.rotate = "R";
+      } else if (item.orientation === "I") {
+        options.rotate = "I";
+      } else if (item.orientation === "B") {
+        options.rotate = "L";
+      }
       if (item.type === "code128") {
         options.bcid = "code128";
         options.parsefnc = true;
@@ -811,7 +1027,20 @@ function BuilderBarcodePreview({ item }: { item: BuilderItem }) {
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, targetW, targetH);
       ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(temp, 0, 0, targetW, targetH);
+      const isLinear =
+        item.type === "code128"
+        || item.type === "gs1128"
+        || item.type === "itf14"
+        || item.type === "code39"
+        || item.type === "ean13";
+      const fit = isLinear
+        ? Math.min(targetW / Math.max(1, temp.width), targetH / Math.max(1, temp.height))
+        : Math.min(targetW / Math.max(1, temp.width), targetH / Math.max(1, temp.height));
+      const drawW = Math.max(1, Math.round(temp.width * fit));
+      const drawH = Math.max(1, Math.round(temp.height * fit));
+      const drawX = Math.round((targetW - drawW) / 2);
+      const drawY = Math.round((targetH - drawH) / 2);
+      ctx.drawImage(temp, drawX, drawY, drawW, drawH);
     } catch {
       const ctx = target.getContext("2d");
       if (!ctx) {
@@ -830,7 +1059,6 @@ function BuilderBarcodePreview({ item }: { item: BuilderItem }) {
     <canvas
       ref={canvasRef}
       className="builder-item-barcode-canvas"
-      style={rotation ? { transform: `rotate(${rotation}deg)`, transformOrigin: "50% 50%" } : undefined}
     />
   );
 }
@@ -1897,7 +2125,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                 }}
               />
             )}
-            {[...items].sort((a, b) => a.zIndex - b.zIndex).map((item) => (
+            {[...items].sort((a, b) => a.zIndex - b.zIndex).filter((item) => item.type !== "passthrough").map((item) => (
               <div
                 key={item.id}
                 className={`builder-item builder-item-${item.type}${selectedIds.includes(item.id) ? " is-selected" : ""}${item.filled ? " is-filled" : ""}`}
@@ -1921,7 +2149,18 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                 {item.type === "text" && (
                   <span
                     style={
-                      {
+                      (() => {
+                        const isQuarterTurn = item.orientation === "R" || item.orientation === "B";
+                        const textLength = Math.max(1, item.text.length);
+                        const logicalWidth = isQuarterTurn ? item.height : item.width;
+                        const logicalHeight = isQuarterTurn ? item.width : item.height;
+                        const fitByHeight = logicalHeight * 0.82;
+                        const fitByWidth = logicalWidth / (textLength * 0.62);
+                        const fitted = Math.max(10, Math.min(fitByHeight, fitByWidth));
+                        return {
+                        fontSize: `${Math.max(10, Math.round(fitted * viewScale))}px`,
+                        lineHeight: 1,
+                        fontWeight: 700,
                         transform:
                           item.orientation === "R"
                             ? "rotate(90deg)"
@@ -1929,8 +2168,10 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                               ? "rotate(180deg)"
                               : item.orientation === "B"
                                 ? "rotate(270deg)"
-                                : undefined
-                      }
+                                : undefined,
+                        transformOrigin: "50% 50%"
+                        };
+                      })()
                     }
                   >
                     {item.text}
