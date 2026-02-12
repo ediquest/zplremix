@@ -20,6 +20,15 @@ npm install
 npm run dev
 ```
 
+## Deploy to GitHub Pages
+
+1. Push this repo to GitHub.
+2. In GitHub go to `Settings -> Pages`.
+3. In `Build and deployment`, set `Source` to `GitHub Actions`.
+4. Push to `master` (or run the workflow manually from `Actions`).
+
+Workflow file: `.github/workflows/deploy-pages.yml`
+
 ## Next implementation targets
 
 - Extend renderer coverage (`^CF`, image commands, better element metrics and exact barcode specs).
