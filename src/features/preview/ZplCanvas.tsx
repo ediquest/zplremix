@@ -382,7 +382,11 @@ function parseNumber(value: string | undefined, fallback: number): number {
   if (!value) {
     return fallback;
   }
-  const parsed = Number(value);
+  const normalized = normalizeNumericToken(value);
+  if (!normalized) {
+    return fallback;
+  }
+  const parsed = Number(normalized);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
@@ -390,7 +394,7 @@ function parseInteger(value: string | undefined, fallback: number): number {
   if (!value) {
     return fallback;
   }
-  const trimmed = value.trim();
+  const trimmed = normalizeNumericToken(value);
   if (!trimmed) {
     return fallback;
   }
@@ -402,7 +406,24 @@ function isNumeric(value: string | undefined): boolean {
   if (!value) {
     return false;
   }
-  return Number.isFinite(Number(value));
+  const normalized = normalizeNumericToken(value);
+  if (!normalized) {
+    return false;
+  }
+  return Number.isFinite(Number(normalized));
+}
+
+function normalizeNumericToken(value: string | undefined): string {
+  if (!value) {
+    return "";
+  }
+  let normalized = value.trim();
+  if (!normalized) {
+    return "";
+  }
+  normalized = normalized.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
+  normalized = normalized.replace(/^["']+|["']+$/g, "").trim();
+  return normalized;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -467,6 +488,20 @@ function tokenizeZplCommands(zpl: string): ZplToken[] {
 function sanitizeLikelyZplSyntaxIssues(zpl: string): { zpl: string; warnings: string[] } {
   let fixed = zpl;
   const warnings: string[] = [];
+  const fsSeparatorMatches = fixed.match(/\u000F/g);
+  if (fsSeparatorMatches?.length) {
+    fixed = fixed.replace(/\u000F/g, "^FS\n");
+    warnings.push(
+      `Detected ${fsSeparatorMatches.length} legacy field separator(s) (0x0F); converted to ^FS for preview.`
+    );
+  }
+  const controlMatches = fixed.match(/[\u0000-\u0008\u000B\u000C\u000E\u0010-\u001F\u007F]/g);
+  if (controlMatches?.length) {
+    fixed = fixed.replace(/[\u0000-\u0008\u000B\u000C\u000E\u0010-\u001F\u007F]/g, "");
+    warnings.push(
+      `Detected and removed ${controlMatches.length} non-printable control character(s) from source payload.`
+    );
+  }
   const doubledCarets = fixed.match(/\^\^(?=[A-Z@~])/gi);
   if (doubledCarets?.length) {
     fixed = fixed.replace(/\^\^(?=[A-Z@~])/gi, "^");
@@ -489,6 +524,42 @@ function normalizeGraphicName(rawName: string): string {
     normalized = `${normalized}.GRF`;
   }
   return normalized;
+}
+
+function graphicLookupKeys(rawName: string): string[] {
+  const normalized = normalizeGraphicName(rawName);
+  if (!normalized) {
+    return [];
+  }
+  const keys: string[] = [];
+  const push = (value: string) => {
+    if (!value) {
+      return;
+    }
+    if (!keys.includes(value)) {
+      keys.push(value);
+    }
+  };
+  push(normalized);
+  const colonIndex = normalized.indexOf(":");
+  const device = colonIndex >= 0 ? normalized.slice(0, colonIndex) : "R";
+  const filePart = colonIndex >= 0 ? normalized.slice(colonIndex + 1) : normalized;
+  const base = filePart.endsWith(".GRF") ? filePart.slice(0, -4) : filePart;
+  push(`${device}:${base}`);
+  push(`${device}:${base}.GRF`);
+  if (device !== "R") {
+    push(`R:${base}`);
+    push(`R:${base}.GRF`);
+  }
+  return keys;
+}
+
+function registerGraphicLookupEntries(
+  downloadedGraphics: Map<string, GraphicField>,
+  rawName: string,
+  graphic: GraphicField
+) {
+  graphicLookupKeys(rawName).forEach((key) => downloadedGraphics.set(key, graphic));
 }
 
 function parseAsciiHexGraphic(
@@ -520,6 +591,133 @@ function parseAsciiHexGraphic(
       addWarning(`${context}: graphic payload is longer than declared size; extra bytes were ignored.`);
     }
     return bytes;
+  };
+
+  const decodeRepeatPrefix = (char: string): number => {
+    if (char >= "G" && char <= "Z") {
+      return char.charCodeAt(0) - "G".charCodeAt(0) + 1;
+    }
+    if (char >= "g" && char <= "z") {
+      return (char.charCodeAt(0) - "g".charCodeAt(0) + 1) * 20;
+    }
+    return 0;
+  };
+
+  const parseAsciiCompressedPayload = (): Uint8Array | null => {
+    const rowHexLength = bytesPerRow * 2;
+    if (rowHexLength <= 0) {
+      addWarning(`${context}: invalid row width for compressed graphic payload.`);
+      return null;
+    }
+
+    const rows: string[] = [];
+    let currentRow = "";
+    let previousRow: string | null = null;
+    let repeatPrefix = 0;
+    let malformedCount = 0;
+
+    const pushRow = (row: string) => {
+      const normalizedRow = row.length >= rowHexLength
+        ? row.slice(0, rowHexLength)
+        : row.padEnd(rowHexLength, "0");
+      rows.push(normalizedRow);
+      previousRow = normalizedRow;
+    };
+
+    const flushCurrentRow = () => {
+      if (!currentRow.length) {
+        return;
+      }
+      while (currentRow.length >= rowHexLength) {
+        pushRow(currentRow.slice(0, rowHexLength));
+        currentRow = currentRow.slice(rowHexLength);
+      }
+      if (currentRow.length > 0) {
+        pushRow(currentRow);
+        currentRow = "";
+      }
+    };
+
+    const appendHex = (hexChar: string, count: number) => {
+      if (count <= 0) {
+        return;
+      }
+      currentRow += hexChar.repeat(count);
+      while (currentRow.length >= rowHexLength) {
+        pushRow(currentRow.slice(0, rowHexLength));
+        currentRow = currentRow.slice(rowHexLength);
+      }
+    };
+
+    for (let i = 0; i < cleaned.length; i += 1) {
+      const char = cleaned[i];
+      const repeat = decodeRepeatPrefix(char);
+      if (repeat > 0) {
+        repeatPrefix += repeat;
+        continue;
+      }
+
+      if (char === ",") {
+        const fillLength = Math.max(0, rowHexLength - currentRow.length);
+        currentRow += "0".repeat(fillLength);
+        flushCurrentRow();
+        repeatPrefix = 0;
+        continue;
+      }
+
+      if (char === "!") {
+        const fillLength = Math.max(0, rowHexLength - currentRow.length);
+        currentRow += "F".repeat(fillLength);
+        flushCurrentRow();
+        repeatPrefix = 0;
+        continue;
+      }
+
+      if (char === ":") {
+        if (currentRow.length) {
+          flushCurrentRow();
+        }
+        if (!previousRow) {
+          malformedCount += 1;
+          repeatPrefix = 0;
+          continue;
+        }
+        pushRow(previousRow);
+        repeatPrefix = 0;
+        continue;
+      }
+
+      if (/^[0-9A-Fa-f]$/.test(char)) {
+        appendHex(char.toUpperCase(), Math.max(1, repeatPrefix));
+        repeatPrefix = 0;
+        continue;
+      }
+
+      malformedCount += 1;
+      repeatPrefix = 0;
+    }
+
+    if (currentRow.length) {
+      flushCurrentRow();
+    }
+
+    if (rows.length === 0) {
+      addWarning(`${context}: compressed graphic payload could not be decoded.`);
+      return null;
+    }
+
+    if (malformedCount > 0) {
+      addWarning(`${context}: compressed graphic payload had ${malformedCount} unsupported token(s); they were ignored.`);
+    }
+
+    const hex = rows.join("");
+    const usableHexLength = hex.length - (hex.length % 2);
+    const decodedBytes = Math.floor(usableHexLength / 2);
+    const parsed = new Uint8Array(decodedBytes);
+    for (let i = 0; i < decodedBytes; i += 1) {
+      parsed[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    }
+    return ensureExpectedLength(parsed);
   };
 
   const parseZ64Payload = (): Uint8Array | null => {
@@ -579,8 +777,7 @@ function parseAsciiHexGraphic(
     return parseZ64Payload();
   }
   if (/[^0-9A-Fa-f]/.test(cleaned)) {
-    addWarning(`${context}: compressed/non-hex graphic data is not supported yet.`);
-    return null;
+    return parseAsciiCompressedPayload();
   }
 
   const usableHexLength = cleaned.length - (cleaned.length % 2);
@@ -1197,6 +1394,11 @@ function resolveFontFamily(sourceName: string): string {
   }
   return "'Segoe UI', Arial, sans-serif";
 }
+
+const BUILTIN_FONT_IDS = new Set([
+  "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+  "A", "B", "C", "D", "E", "F", "G", "H"
+]);
 
 function lineWidthWithStretch(ctx: CanvasRenderingContext2D, line: string, stretch: number): number {
   return ctx.measureText(line).width * stretch;
@@ -2573,6 +2775,7 @@ function drawZplPreview(
   let currentFieldNumber: number | null = null;
   let currentFieldHadData = false;
   const downloadedGraphics = new Map<string, GraphicField>();
+  const fontAliases = new Map<string, string>();
   const fieldTemplates = new Map<number, FieldTemplate>();
   const fieldValues = new Map<number, string>();
   const fieldSerials = new Map<number, SerialState>();
@@ -2615,6 +2818,50 @@ function drawZplPreview(
   const addWarning = (message: string) => {
     addDiagnostic(message, { severity: "warning", kind: "data_warning" });
   };
+  const addWarningAtToken = (token: ZplToken, message: string) => {
+    addDiagnostic(message, {
+      line: token.line,
+      command: token.command,
+      severity: "warning",
+      kind: "data_warning"
+    });
+  };
+  const registerDownloadedGraphicToken = (token: ZplToken) => {
+    const [nameRaw, totalRaw, bytesPerRowRaw, dataRaw] = splitLeadingArgs(token.args, 4);
+    const normalizedName = normalizeGraphicName(nameRaw);
+    if (!normalizedName) {
+      addWarningAtToken(token, "~DG command without a valid graphic name was ignored.");
+      return;
+    }
+    const bytesPerRow = Math.max(0, parseInteger(bytesPerRowRaw, 0));
+    const totalBytes = Math.max(0, parseInteger(totalRaw, 0));
+    if (bytesPerRow <= 0 || totalBytes <= 0) {
+      addWarningAtToken(token, `~DG ${normalizedName}: invalid dimensions (total=${totalRaw}, row=${bytesPerRowRaw}).`);
+      return;
+    }
+    const rowCount = Math.max(1, Math.ceil(totalBytes / bytesPerRow));
+    const bytes = parseAsciiHexGraphic(
+      dataRaw,
+      bytesPerRow,
+      rowCount,
+      `~DG ${normalizedName}`,
+      (message) => addWarningAtToken(token, message)
+    );
+    if (!bytes) {
+      return;
+    }
+    registerGraphicLookupEntries(downloadedGraphics, normalizedName, {
+      bytesPerRow,
+      rowCount,
+      bytes
+    });
+  };
+  // Load ~DG graphics first so ^XG can reference entries defined later in stream.
+  tokens.forEach((token) => {
+    if (token.prefix === "~" && token.command === "DG") {
+      registerDownloadedGraphicToken(token);
+    }
+  });
   const expectedDpi = densityDpmmToDpi(printerSettings.densityDpmm);
   if (expectedDpi !== printerSettings.dpi) {
     addDiagnostic(
@@ -2990,34 +3237,7 @@ function drawZplPreview(
     }
 
     if (command === "DG" && token.prefix === "~") {
-      const [nameRaw, totalRaw, bytesPerRowRaw, dataRaw] = splitLeadingArgs(args, 4);
-      const normalizedName = normalizeGraphicName(nameRaw);
-      if (!normalizedName) {
-        addWarning("~DG command without a valid graphic name was ignored.");
-        return;
-      }
-      const bytesPerRow = Math.max(0, parseInteger(bytesPerRowRaw, 0));
-      const totalBytes = Math.max(0, parseInteger(totalRaw, 0));
-      if (bytesPerRow <= 0 || totalBytes <= 0) {
-        addWarning(`~DG ${normalizedName}: invalid dimensions (total=${totalRaw}, row=${bytesPerRowRaw}).`);
-        return;
-      }
-      const rowCount = Math.max(1, Math.ceil(totalBytes / bytesPerRow));
-      const bytes = parseAsciiHexGraphic(
-        dataRaw,
-        bytesPerRow,
-        rowCount,
-        `~DG ${normalizedName}`,
-        addWarning
-      );
-      if (!bytes) {
-        return;
-      }
-      downloadedGraphics.set(normalizedName, {
-        bytesPerRow,
-        rowCount,
-        bytes
-      });
+      // Already parsed in pre-scan to support forward references for ^XG.
       return;
     }
 
@@ -3031,10 +3251,22 @@ function drawZplPreview(
       const isLikelyCfa = firstArg?.length === 1 && !isNumeric(firstArg) && isNumeric(parts[1]);
       const height = isLikelyCfa ? cfaHeight : cfHeight;
       const width = isLikelyCfa ? cfaWidth : cfWidth;
-      if (!isLikelyCfa && firstArg && firstArg !== "0" && firstArg !== "A") {
-        addWarning(`Font "${firstArg}" is not available in preview. Falling back to A0.`);
+      const fontId = (firstArg ?? "").slice(0, 1);
+      let sourceName = "A0";
+      if (!isLikelyCfa && fontId) {
+        const alias = fontAliases.get(fontId);
+        if (alias) {
+          sourceName = alias;
+        } else if (fontId === "0" || fontId === "A") {
+          sourceName = "A0";
+        } else if (BUILTIN_FONT_IDS.has(fontId)) {
+          sourceName = `A${fontId}`;
+        } else {
+          addWarning(`Font "${fontId}" is not available in preview. Falling back to A0.`);
+        }
+      } else if (isLikelyCfa && fontId) {
+        sourceName = `A${fontId}`;
       }
-      const sourceName = (firstArg && firstArg.length === 1 ? `A${firstArg}` : "A0").toUpperCase();
       font = {
         ...font,
         width,
@@ -3096,6 +3328,17 @@ function drawZplPreview(
         return;
       }
       encoding = nextEncoding;
+      return;
+    }
+
+    if (command === "CW") {
+      const aliasId = (parts[0] ?? "").trim().toUpperCase().slice(0, 1);
+      const sourceName = (parts[1] ?? "").trim().toUpperCase();
+      if (!aliasId || !sourceName) {
+        addWarning("^CW is missing alias id or font source. Command ignored.");
+        return;
+      }
+      fontAliases.set(aliasId, sourceName);
       return;
     }
 
@@ -3186,7 +3429,9 @@ function drawZplPreview(
         addWarning("^XG command without a valid graphic name was ignored.");
         return;
       }
-      const graphic = downloadedGraphics.get(normalizedName);
+      const graphic = graphicLookupKeys(nameRaw)
+        .map((key) => downloadedGraphics.get(key))
+        .find((item): item is GraphicField => !!item);
       if (!graphic) {
         addWarning(`^XG could not find graphic "${normalizedName}".`);
         return;

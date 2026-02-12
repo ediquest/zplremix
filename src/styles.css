@@ -1554,6 +1554,28 @@ option {
   border-width: 2px;
 }
 
+.builder-item-passthrough {
+  background: repeating-linear-gradient(
+      135deg,
+      rgba(31, 44, 63, 0.08) 0,
+      rgba(31, 44, 63, 0.08) 8px,
+      rgba(31, 44, 63, 0.16) 8px,
+      rgba(31, 44, 63, 0.16) 16px
+    ),
+    rgba(255, 255, 255, 0.78);
+  border-style: dashed;
+}
+
+.builder-item-passthrough-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #1f2c3f;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.85);
+}
+
 .builder-item-box.is-filled,
 .builder-item-circle.is-filled,
 .builder-item-ellipse.is-filled {

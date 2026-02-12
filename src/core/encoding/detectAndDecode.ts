@@ -65,6 +65,28 @@ function extractXmlPayloadCandidates(raw: string): string[] {
     return [];
   }
 
+  // Prefer explicit LABEL.* shipping parameters from API responses (e.g. PrintParcelResponse).
+  const labeledPayloads: string[] = [];
+  const shippingParamRe =
+    /<ShippingParameter\b[^>]*>[\s\S]*?<Name>([\s\S]*?)<\/Name>[\s\S]*?<Value>([\s\S]*?)<\/Value>[\s\S]*?<\/ShippingParameter>/gi;
+  let shippingMatch = shippingParamRe.exec(raw);
+  while (shippingMatch) {
+    const name = (shippingMatch[1] ?? "").trim();
+    const value = stripCdata((shippingMatch[2] ?? "").trim());
+    if (/^LABEL\./i.test(name)) {
+      const normalized = normalizeBase64(value);
+      if (BASE64_BODY.test(value) && normalized.length >= 12) {
+        labeledPayloads.push(value);
+      } else if (looksLikeZpl(value)) {
+        labeledPayloads.push(value);
+      }
+    }
+    shippingMatch = shippingParamRe.exec(raw);
+  }
+  if (labeledPayloads.length) {
+    return labeledPayloads;
+  }
+
   const candidates: string[] = [];
   const pushCandidate = (value: string) => {
     if (!value) {
@@ -162,6 +184,19 @@ function extractXmlPayloadCandidates(raw: string): string[] {
   return candidates;
 }
 
+function scoreDecodedZpl(text: string): number {
+  const xaCount = (text.match(/\^XA/g) ?? []).length;
+  const xzCount = (text.match(/\^XZ/g) ?? []).length;
+  const pairs = Math.min(xaCount, xzCount);
+  const graphicsRefs = (text.match(/\^XG/g) ?? []).length;
+  const downloads = (text.match(/~DG/g) ?? []).length;
+  return pairs * 1_000_000 + graphicsRefs * 10_000 + downloads * 10_000 + text.length;
+}
+
+function pickBestDecodedInput(items: DetectedInput[]): DetectedInput {
+  return [...items].sort((a, b) => scoreDecodedZpl(b.text) - scoreDecodedZpl(a.text))[0];
+}
+
 export function detectAndDecode(raw: string): DetectedInput {
   const trimmed = raw.trim();
 
@@ -194,10 +229,7 @@ export function detectAndDecode(raw: string): DetectedInput {
     return xmlDecoded[0];
   }
   if (xmlDecoded.length > 1) {
-    return {
-      mode: xmlDecoded[0].mode,
-      text: xmlDecoded.map((item) => item.text).join("\n")
-    };
+    return pickBestDecodedInput(xmlDecoded);
   }
 
   return { mode: "plain", text: raw };

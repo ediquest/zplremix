@@ -257,6 +257,58 @@ function parseGraphicFieldSize(body: string): { width: number; height: number } 
   };
 }
 
+function normalizeGraphicName(rawName: string): string {
+  let normalized = (rawName ?? "").trim().toUpperCase();
+  if (!normalized) {
+    return "";
+  }
+  if (!normalized.includes(":")) {
+    normalized = `R:${normalized}`;
+  }
+  if (!normalized.includes(".")) {
+    normalized = `${normalized}.GRF`;
+  }
+  return normalized;
+}
+
+function extractDownloadedGraphicSizes(zpl: string): Map<string, { width: number; height: number }> {
+  const sizes = new Map<string, { width: number; height: number }>();
+  const normalized = zpl
+    .replace(/\u000F/g, "^FS\n")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E\u0010-\u001F\u007F]/g, "");
+  const re = /~DG([^,\^~]+),([^,\^~]+),([^,\^~]+),[^\^~]*/gi;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(normalized)) !== null) {
+    const name = normalizeGraphicName(match[1] ?? "");
+    const totalBytes = Math.max(0, Number.parseInt((match[2] ?? "").trim(), 10));
+    const bytesPerRow = Math.max(1, Number.parseInt((match[3] ?? "").trim(), 10));
+    if (!name || totalBytes <= 0 || bytesPerRow <= 0) {
+      continue;
+    }
+    const rowCount = Math.max(1, Math.ceil(totalBytes / bytesPerRow));
+    sizes.set(name, {
+      width: Math.max(8, bytesPerRow * 8),
+      height: Math.max(8, rowCount)
+    });
+  }
+  return sizes;
+}
+
+function extractGraphicDownloadCommands(zpl: string): string[] {
+  const normalized = zpl
+    .replace(/\u000F/g, "^FS\n")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E\u0010-\u001F\u007F]/g, "");
+  const matches = normalized.match(/~DG[^\^~]*/gi) ?? [];
+  const unique = new Set<string>();
+  matches.forEach((entry) => {
+    const value = entry.trim();
+    if (value) {
+      unique.add(value);
+    }
+  });
+  return Array.from(unique.values());
+}
+
 function stripCode128ControlSequences(value: string): string {
   return (value ?? "").replace(/>([:;689])/g, "");
 }
@@ -414,8 +466,14 @@ function snapToItemsAxis(
   return snapped;
 }
 
-function buildZplFromItems(items: BuilderItem[], canvasWidth: number, canvasHeight: number): string {
+function buildZplFromItems(
+  items: BuilderItem[],
+  canvasWidth: number,
+  canvasHeight: number,
+  graphicDownloads: string[] = []
+): string {
   const lines = ["^XA", `^PW${canvasWidth}`, `^LL${canvasHeight}`, "^LH0,0"];
+  graphicDownloads.forEach((entry) => lines.push(entry));
   [...items].sort((a, b) => a.zIndex - b.zIndex).forEach((item) => {
     const x = Math.round(item.x);
     const y = Math.round(item.y);
@@ -532,9 +590,13 @@ function buildZplFromItems(items: BuilderItem[], canvasWidth: number, canvasHeig
 
 function parseItemsFromZpl(zpl: string): BuilderItem[] {
   const items: BuilderItem[] = [];
-  const fieldRegex = /\^(FO|FT)(-?\d+),(-?\d+)([\s\S]*?)\^FS/g;
+  const normalizedZpl = zpl
+    .replace(/\u000F/g, "^FS\n")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E\u0010-\u001F\u007F]/g, "");
+  const downloadedGraphics = extractDownloadedGraphicSizes(normalizedZpl);
+  const fieldRegex = /\^(FO|FT)"?(-?\d+)"?,\s*"?(-?\d+)"?([\s\S]*?)\^FS/g;
   let match: RegExpExecArray | null;
-  while ((match = fieldRegex.exec(zpl)) !== null) {
+  while ((match = fieldRegex.exec(normalizedZpl)) !== null) {
     const command = (match[1] === "FT" ? "FT" : "FO") as "FO" | "FT";
     const rawX = Number(match[2]);
     const rawY = Number(match[3]);
@@ -542,7 +604,7 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
     if (!Number.isFinite(rawX) || !Number.isFinite(rawY)) {
       continue;
     }
-    const fieldOrientation = getFieldOrientationFromFormat(zpl, match.index, body);
+    const fieldOrientation = getFieldOrientationFromFormat(normalizedZpl, match.index, body);
     const pushParsed = (item: BuilderItem) => {
       items.push({
         ...item,
@@ -566,6 +628,38 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
         width: gfSize.width,
         height: gfSize.height,
         text: "",
+        filled: false,
+        zIndex: items.length,
+        font: "0",
+        orientation: fieldOrientation
+      });
+      continue;
+    }
+
+    const xg = /\^XG([^,\^]+)(?:,(\d+))?(?:,(\d+))?/i.exec(body);
+    if (xg) {
+      const name = normalizeGraphicName(xg[1] ?? "");
+      const mx = Math.max(1, Number.parseInt((xg[2] ?? "1").trim(), 10) || 1);
+      const my = Math.max(1, Number.parseInt((xg[3] ?? "1").trim(), 10) || 1);
+      const base = downloadedGraphics.get(name) ?? { width: 120, height: 120 };
+      const width = Math.max(8, base.width * mx);
+      const height = Math.max(8, base.height * my);
+      const position = mapFieldPosition(
+        command,
+        rawX,
+        rawY,
+        width,
+        height,
+        fieldOrientation
+      );
+      pushParsed({
+        id: crypto.randomUUID(),
+        type: "passthrough",
+        x: position.x,
+        y: position.y,
+        width: position.width,
+        height: position.height,
+        text: `XG ${name || "GRAPHIC"}`,
         filled: false,
         zIndex: items.length,
         font: "0",
@@ -1162,7 +1256,11 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     }
     return items.find((item) => item.id === selectedIds[0]) ?? null;
   }, [items, selectedIds]);
-  const generatedZpl = useMemo(() => buildZplFromItems(items, canvasWidth, canvasHeight), [items, canvasWidth, canvasHeight]);
+  const sourceGraphicDownloads = useMemo(() => extractGraphicDownloadCommands(seedZpl), [seedZpl]);
+  const generatedZpl = useMemo(
+    () => buildZplFromItems(items, canvasWidth, canvasHeight, sourceGraphicDownloads),
+    [items, canvasWidth, canvasHeight, sourceGraphicDownloads]
+  );
   const sizeRange =
     canvasSettings.labelUnit === "in"
       ? { min: 1, max: 12, step: 0.1 }
@@ -2109,7 +2207,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                 }}
               />
             )}
-            {[...items].sort((a, b) => a.zIndex - b.zIndex).filter((item) => item.type !== "passthrough").map((item) => (
+            {[...items].sort((a, b) => a.zIndex - b.zIndex).map((item) => (
               <div
                 key={item.id}
                 className={`builder-item builder-item-${item.type}${selectedIds.includes(item.id) ? " is-selected" : ""}${item.filled ? " is-filled" : ""}`}
@@ -2160,6 +2258,9 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                   >
                     {item.text}
                   </span>
+                )}
+                {item.type === "passthrough" && (
+                  <span className="builder-item-passthrough-label">{item.text || "PASSTHROUGH"}</span>
                 )}
                 {isBarcodeElementType(item.type) && <BuilderBarcodePreview item={item} />}
                 <span className="builder-item-resize-handle builder-item-resize-handle-right" onMouseDown={(e) => onResizeHandleMouseDown(e, item, "right")} />

@@ -143,7 +143,26 @@ export default function App() {
     [decoded.text]
   );
   const availableLabels = useMemo(
-    () => [...labels, ...zipLabels],
+    () => {
+      const byContent = new Map<string, LabelCandidate>();
+      const push = (item: LabelCandidate) => {
+        const key = item.zpl.trim();
+        if (!key) {
+          return;
+        }
+        const existing = byContent.get(key);
+        if (!existing) {
+          byContent.set(key, item);
+          return;
+        }
+        if (existing.source === "editor" && item.source !== "editor") {
+          byContent.set(key, item);
+        }
+      };
+      labels.forEach(push);
+      zipLabels.forEach(push);
+      return Array.from(byContent.values());
+    },
     [labels, zipLabels]
   );
   const selectedLabel = useMemo(
