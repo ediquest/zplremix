@@ -308,30 +308,71 @@ body {
   color: #b45309;
 }
 
-.label-select-wrap {
+.label-tiles-panel {
+  min-height: 0;
+  padding: 12px;
+}
+
+.label-tiles-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 10px;
+}
+
+.label-tile {
+  border: 1px solid #b9cbea;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #fbfdff 0%, #f2f7ff 100%);
+  padding: 8px;
+  cursor: pointer;
+  text-align: left;
+  display: grid;
+  gap: 8px;
+  transition: border-color 140ms ease, box-shadow 180ms ease, transform 140ms ease;
+}
+
+.label-tile:hover {
+  border-color: #739cd8;
+  box-shadow: 0 8px 16px rgba(26, 65, 124, 0.14);
+  transform: translateY(-1px);
+}
+
+.label-tile.is-active {
+  border-color: #2f6ee5;
+  box-shadow: 0 0 0 2px rgba(47, 110, 229, 0.22);
+}
+
+.label-tile-image {
+  width: 100%;
+  aspect-ratio: 210 / 132;
+  border: 1px solid #ccd9ee;
+  border-radius: 8px;
+  background: #ffffff;
+  object-fit: contain;
+}
+
+.label-tile-image.is-placeholder {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin-bottom: 12px;
+  justify-content: center;
+  color: #4f6487;
+  font-size: 13px;
+  font-weight: 600;
 }
 
-.label-select-wrap label {
-  font-size: 14px;
-  color: #41536d;
-}
-
-.label-select-wrap select {
-  flex: 1;
-  padding: 8px;
-  border: 1px solid #b9c9e0;
-  border-radius: 8px;
-  background: white;
+.label-tile-meta {
+  font-size: 12px;
+  font-weight: 700;
+  color: #294267;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
 }
 
 .preview-settings-accordion {
   border: 1px solid #c5d4eb;
   border-radius: 10px;
   background: #f8fbff;
+  margin-top: 8px;
   margin-bottom: 12px;
   overflow: hidden;
 }
@@ -482,10 +523,10 @@ body {
   justify-content: center;
   padding: 8px;
   min-height: 0;
-  width: fit-content;
+  width: 100%;
   max-width: 100%;
   margin: 0;
-  align-self: center;
+  align-self: stretch;
   overflow: hidden;
 }
 
@@ -585,7 +626,7 @@ body {
 }
 
 .preview-warnings {
-  margin-top: 12px;
+  margin-top: 8px;
   border: 1px solid #e6c58b;
   border-radius: 8px;
   background: #fff8e9;
@@ -609,7 +650,7 @@ body {
 }
 
 .preview-diagnostics {
-  margin-top: 12px;
+  margin-top: 8px;
   border: 1px solid #b4c6e6;
   border-radius: 8px;
   background: #f4f8ff;

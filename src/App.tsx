@@ -4,6 +4,7 @@ import type { LabelCandidate } from "./core/types";
 import { extractLabels } from "./core/zpl/extractLabels";
 import { LabelBuilderPage } from "./features/builder/LabelBuilderPage";
 import { EditorPanel } from "./features/editor/EditorPanel";
+import { LabelTilesPanel } from "./features/import/LabelTilesPanel";
 import { ZipUpload } from "./features/import/ZipUpload";
 import { PreviewPanel } from "./features/preview/PreviewPanel";
 
@@ -144,12 +145,16 @@ export default function App() {
         <div className="left-column">
           <EditorPanel rawInput={rawInput} onInputChange={setRawInput} />
           <ZipUpload onLabelsDetected={onZipLabelsDetected} />
+          <LabelTilesPanel
+            labels={availableLabels}
+            selectedLabelId={selectedLabelId}
+            onSelectLabel={onSelectLabel}
+          />
         </div>
         <PreviewPanel
           mode={decoded.mode}
           labels={availableLabels}
           selectedLabelId={selectedLabelId}
-          onSelectLabel={onSelectLabel}
           onOpenBuilder={openBuilder}
           persistCurrentZpl={persistCurrentZpl}
           onPersistCurrentZplChange={setPersistCurrentZpl}

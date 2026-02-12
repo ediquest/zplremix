@@ -10,7 +10,6 @@ type PreviewPanelProps = {
   mode: string;
   labels: LabelCandidate[];
   selectedLabelId: string | null;
-  onSelectLabel: (id: string) => void;
   onOpenBuilder: (zpl?: string) => void;
   persistCurrentZpl: boolean;
   onPersistCurrentZplChange: (enabled: boolean) => void;
@@ -111,7 +110,6 @@ export function PreviewPanel({
   mode,
   labels,
   selectedLabelId,
-  onSelectLabel,
   onOpenBuilder,
   persistCurrentZpl,
   onPersistCurrentZplChange
@@ -360,23 +358,73 @@ export function PreviewPanel({
         <p className="muted">Detected mode: {mode}</p>
       </div>
 
-      <div className="label-select-wrap">
-        <label htmlFor="label-select">Label</label>
-        <select
-          id="label-select"
-          value={selectedLabel?.id ?? ""}
-          onChange={(e) => onSelectLabel(e.target.value)}
-          disabled={!labels.length}
-        >
-          {!labels.length && <option value="">No labels detected</option>}
-          {labels.map((label) => (
-            <option key={label.id} value={label.id}>
-              {label.source} #{label.index}
-            </option>
-          ))}
-        </select>
+      <div className="preview-wrap" ref={previewWrapRef}>
+        {selectedLabel ? (
+          <div className="preview-stage" style={previewStageStyle}>
+            <div className="preview-rotator" style={{ transform: `rotate(${canvasRotationDeg}deg) scale(${fitScale})` }}>
+              <ZplCanvas
+                zpl={selectedLabel.zpl}
+                onWarningsChange={setWarnings}
+                onDiagnosticsChange={setDiagnostics}
+                onCanvasReady={handleCanvasReady}
+                printerSettings={printerSettings}
+                showNonPrintableZones={showNonPrintableZones}
+                respectZplGeometry={respectZplGeometry}
+                printEngineOverride={printEngineOverride}
+              />
+            </div>
+          </div>
+        ) : (
+          <div className="empty-state">
+            Paste a valid ZPL payload containing <code>^XA</code> and{" "}
+            <code>^XZ</code>.
+          </div>
+        )}
       </div>
-
+      {selectedLabel && (
+        <div className="preview-toolbar">
+          <div className="preview-rotate-actions">
+            <button
+              type="button"
+              className="rotate-btn rotate-btn-icon"
+              onClick={rotatePreviewLeft}
+              title="Rotate Left"
+              aria-label="Rotate Left"
+            >
+              ↺
+            </button>
+            <button
+              type="button"
+              className="rotate-btn rotate-btn-icon"
+              onClick={rotatePreviewRight}
+              title="Rotate Right"
+              aria-label="Rotate Right"
+            >
+              ↻
+            </button>
+            <button type="button" className="rotate-btn" onClick={() => onOpenBuilder(selectedLabel.zpl)}>
+              Open In Builder
+            </button>
+          </div>
+          <div className="download-actions">
+            <button type="button" className="download-btn" onClick={downloadZpl}>
+              <span className="download-icon" aria-hidden>↓</span> ZPL
+            </button>
+            <button type="button" className="download-btn" onClick={downloadPrn}>
+              <span className="download-icon" aria-hidden>↓</span> PRN
+            </button>
+            <button type="button" className="download-btn" onClick={downloadPng}>
+              <span className="download-icon" aria-hidden>↓</span> PNG
+            </button>
+            <button type="button" className="download-btn" onClick={downloadPdf}>
+              <span className="download-icon" aria-hidden>↓</span> PDF
+            </button>
+            <button type="button" className="download-btn" onClick={downloadJson}>
+              <span className="download-icon" aria-hidden>↓</span> JSON
+            </button>
+          </div>
+        </div>
+      )}
       <section className={`preview-settings-accordion${settingsOpen ? " is-open" : ""}`}>
         <button
           type="button"
@@ -605,74 +653,6 @@ export function PreviewPanel({
       </div>
         </div>
       </section>
-
-      <div className="preview-wrap" ref={previewWrapRef}>
-        {selectedLabel ? (
-          <div className="preview-stage" style={previewStageStyle}>
-            <div className="preview-rotator" style={{ transform: `rotate(${canvasRotationDeg}deg) scale(${fitScale})` }}>
-              <ZplCanvas
-                zpl={selectedLabel.zpl}
-                onWarningsChange={setWarnings}
-                onDiagnosticsChange={setDiagnostics}
-                onCanvasReady={handleCanvasReady}
-                printerSettings={printerSettings}
-                showNonPrintableZones={showNonPrintableZones}
-                respectZplGeometry={respectZplGeometry}
-                printEngineOverride={printEngineOverride}
-              />
-            </div>
-          </div>
-        ) : (
-          <div className="empty-state">
-            Paste a valid ZPL payload containing <code>^XA</code> and{" "}
-            <code>^XZ</code>.
-          </div>
-        )}
-      </div>
-      {selectedLabel && (
-        <div className="preview-toolbar">
-          <div className="preview-rotate-actions">
-            <button
-              type="button"
-              className="rotate-btn rotate-btn-icon"
-              onClick={rotatePreviewLeft}
-              title="Rotate Left"
-              aria-label="Rotate Left"
-            >
-              ↺
-            </button>
-            <button
-              type="button"
-              className="rotate-btn rotate-btn-icon"
-              onClick={rotatePreviewRight}
-              title="Rotate Right"
-              aria-label="Rotate Right"
-            >
-              ↻
-            </button>
-            <button type="button" className="rotate-btn" onClick={() => onOpenBuilder(selectedLabel.zpl)}>
-              Open In Builder
-            </button>
-          </div>
-          <div className="download-actions">
-            <button type="button" className="download-btn" onClick={downloadZpl}>
-              <span className="download-icon" aria-hidden>↓</span> ZPL
-            </button>
-            <button type="button" className="download-btn" onClick={downloadPrn}>
-              <span className="download-icon" aria-hidden>↓</span> PRN
-            </button>
-            <button type="button" className="download-btn" onClick={downloadPng}>
-              <span className="download-icon" aria-hidden>↓</span> PNG
-            </button>
-            <button type="button" className="download-btn" onClick={downloadPdf}>
-              <span className="download-icon" aria-hidden>↓</span> PDF
-            </button>
-            <button type="button" className="download-btn" onClick={downloadJson}>
-              <span className="download-icon" aria-hidden>↓</span> JSON
-            </button>
-          </div>
-        </div>
-      )}
       {!!warnings.length && (
         <div className="preview-warnings">
           <h3>Warnings</h3>
