@@ -8,6 +8,7 @@ const LS_PREVIEW_SETTINGS_KEY = "zplremix.preview.settings";
 
 type PreviewPanelProps = {
   mode: string;
+  theme: "light" | "dark-plus" | "abyss";
   labels: LabelCandidate[];
   selectedLabelId: string | null;
   onOpenBuilder: (zpl?: string) => void;
@@ -108,6 +109,7 @@ function loadPersistedSettings(): PersistedPreviewSettings {
 
 export function PreviewPanel({
   mode,
+  theme,
   labels,
   selectedLabelId,
   onOpenBuilder,
@@ -215,6 +217,7 @@ export function PreviewPanel({
     }),
     [printEngineOverrideEnabled, printEngineDarkness, printEngineSpeedIps]
   );
+  const labelPaperColor = theme === "light" ? "#ffffff" : theme === "dark-plus" ? "#d9dde3" : "#d3d8df";
 
   const saveBlob = (blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob);
@@ -367,6 +370,7 @@ export function PreviewPanel({
                 onWarningsChange={setWarnings}
                 onDiagnosticsChange={setDiagnostics}
                 onCanvasReady={handleCanvasReady}
+                labelPaperColor={labelPaperColor}
                 printerSettings={printerSettings}
                 showNonPrintableZones={showNonPrintableZones}
                 respectZplGeometry={respectZplGeometry}

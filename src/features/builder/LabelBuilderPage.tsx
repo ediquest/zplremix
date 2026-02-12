@@ -1657,22 +1657,6 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
   }, [selectedIds, draggingId, resizing, canvasWidth, canvasHeight]);
 
   return (
-    <main className="app-shell builder-shell">
-      <header className="app-header builder-header">
-        <h1>ZPLRemix Builder</h1>
-        <div className="builder-header-actions">
-          <button type="button" className="download-btn" onClick={resetToNewLabel}>
-            New Label
-          </button>
-          <button type="button" className="download-btn" onClick={() => onBack()}>
-            Back
-          </button>
-          <button type="button" className="download-btn" onClick={() => onBack(isDirty ? generatedZpl : seedZpl)}>
-            Apply To Main View
-          </button>
-        </div>
-      </header>
-
       <section className="builder-grid">
         <aside className="builder-sidebar">
           <section className={`builder-accordion${accordionOpen.canvas ? " is-open" : ""}`}>
@@ -2095,7 +2079,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
         </aside>
 
         <section className="builder-canvas-wrap">
-          <h2>Canvas</h2>
+          <h2>Label</h2>
           <div
             ref={canvasRef}
             className="builder-canvas"
@@ -2105,7 +2089,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
               backgroundImage:
                 `linear-gradient(0deg, rgba(210, 223, 242, ${gridAlpha}) 1px, transparent 1px), ` +
                 `linear-gradient(90deg, rgba(210, 223, 242, ${gridAlpha}) 1px, transparent 1px), ` +
-                "linear-gradient(#fdfefe, #fdfefe)",
+                "linear-gradient(var(--label-paper), var(--label-paper))",
               backgroundSize: `${safeGridSize}px ${safeGridSize}px, ${safeGridSize}px ${safeGridSize}px, auto`
             }}
             onDragOver={(e) => e.preventDefault()}
@@ -2215,11 +2199,21 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
               <textarea value={seedZpl} readOnly />
             </div>
           </section>
-          <button type="button" className="download-btn" onClick={() => onBack(seedZpl)}>
-            Use Source ZPL And Back
-          </button>
+          <div className="builder-bottom-actions">
+            <button type="button" className="download-btn" onClick={resetToNewLabel}>
+              New Label
+            </button>
+            <button type="button" className="download-btn" onClick={() => onBack()}>
+              Back
+            </button>
+            <button type="button" className="download-btn" onClick={() => onBack(isDirty ? generatedZpl : seedZpl)}>
+              Apply To Main View
+            </button>
+            <button type="button" className="download-btn" onClick={() => onBack(seedZpl)}>
+              Use Source ZPL And Back
+            </button>
+          </div>
         </aside>
       </section>
-    </main>
   );
 }

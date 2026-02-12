@@ -17,6 +17,7 @@ type ZplCanvasProps = {
     darkness: number;
     speedIps: number;
   };
+  labelPaperColor?: string;
 };
 
 type Orientation = "N" | "R" | "I" | "B";
@@ -180,6 +181,7 @@ type DrawRenderOptions = {
   withChrome: boolean;
   fitToCanvas: boolean;
   textScale: number;
+  labelPaperColor?: string;
 };
 
 type Rect = {
@@ -2512,15 +2514,16 @@ function drawZplPreview(
   };
 
   ctx.clearRect(0, 0, width, height);
+  const labelPaperColor = renderOptions.labelPaperColor || "#ffffff";
   if (renderOptions.withChrome) {
     ctx.fillStyle = "#e6effb";
     ctx.fillRect(0, 0, width, height);
-    ctx.fillStyle = "#ffffff";
+    ctx.fillStyle = labelPaperColor;
     ctx.fillRect(originX, originY, renderLabelWidth, renderLabelHeight);
     ctx.strokeStyle = "#9caec9";
     ctx.strokeRect(originX, originY, renderLabelWidth, renderLabelHeight);
   } else {
-    ctx.fillStyle = "#ffffff";
+    ctx.fillStyle = labelPaperColor;
     ctx.fillRect(0, 0, width, height);
   }
   if (
@@ -3581,7 +3584,7 @@ export function renderLabelForExport(
     printerSettings,
     false,
     respectZplGeometry,
-    { withChrome: false, fitToCanvas: false, textScale: 1 },
+    { withChrome: false, fitToCanvas: false, textScale: 1, labelPaperColor: "#ffffff" },
     printEngineOverride
   );
   return canvas;
@@ -3596,7 +3599,8 @@ export function ZplCanvas({
   printerSettings = DEFAULT_PRINTER_SETTINGS,
   showNonPrintableZones = true,
   respectZplGeometry = true,
-  printEngineOverride
+  printEngineOverride,
+  labelPaperColor = "#ffffff"
 }: ZplCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -3615,7 +3619,7 @@ export function ZplCanvas({
       printerSettings,
       showNonPrintableZones,
       respectZplGeometry,
-      { withChrome: false, fitToCanvas: false, textScale: 1 },
+      { withChrome: false, fitToCanvas: false, textScale: 1, labelPaperColor },
       printEngineOverride
     );
     if (onCode128DebugChange) {
@@ -3638,6 +3642,7 @@ export function ZplCanvas({
     printerSettings,
     respectZplGeometry,
     showNonPrintableZones,
+    labelPaperColor,
     printEngineOverride,
     zpl
   ]);
