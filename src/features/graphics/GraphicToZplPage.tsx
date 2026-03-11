@@ -22,11 +22,14 @@ type GraphicItem = {
 
 type GraphicToZplPageProps = {
   onOpenBuilder?: (zpl?: string) => void;
+  onOpenPreview?: (zpl?: string) => void;
+  onSaveZpl?: (zpl: string) => boolean;
   initialState?: GraphicToZplStoredState | null;
   onStateChange?: (state: GraphicToZplStoredState) => void;
 };
 
 const LS_GRAPHIC_TO_ZPL_KEY = "zplremix.graphic_to_zpl.state";
+const LS_PREVIEW_SETTINGS_KEY = "zplremix.preview.settings";
 const SUPPORTED_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"];
 const SUPPORTED_MIME_PREFIXES = [
   "image/png",
@@ -49,6 +52,19 @@ export type GraphicToZplStoredState = {
   selectedId: string | null;
   lockScale: boolean;
 };
+
+function loadShowNonPrintableZones(): boolean {
+  try {
+    const raw = window.localStorage.getItem(LS_PREVIEW_SETTINGS_KEY);
+    if (!raw) {
+      return true;
+    }
+    const parsed = JSON.parse(raw) as { showNonPrintableZones?: unknown };
+    return typeof parsed.showNonPrintableZones === "boolean" ? parsed.showNonPrintableZones : true;
+  } catch {
+    return true;
+  }
+}
 
 function loadStoredState(): GraphicToZplStoredState | null {
   try {
@@ -217,14 +233,16 @@ async function dataUrlToDg(
   };
 }
 
-export function GraphicToZplPage({ onOpenBuilder, initialState, onStateChange }: GraphicToZplPageProps) {
+export function GraphicToZplPage({ onOpenBuilder, onOpenPreview, onSaveZpl, initialState, onStateChange }: GraphicToZplPageProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [items, setItems] = useState<GraphicItem[]>(() => initialState?.items ?? loadStoredState()?.items ?? []);
   const [selectedId, setSelectedId] = useState<string | null>(() => initialState?.selectedId ?? loadStoredState()?.selectedId ?? null);
   const [error, setError] = useState<string>("");
   const [isConverting, setIsConverting] = useState<boolean>(false);
   const [copied, setCopied] = useState<boolean>(false);
+  const [saved, setSaved] = useState<boolean>(false);
   const [lockScale, setLockScale] = useState<boolean>(() => initialState?.lockScale ?? loadStoredState()?.lockScale ?? true);
+  const [showNonPrintableZones] = useState<boolean>(() => loadShowNonPrintableZones());
   const dragRef = useRef<{
     itemId: string;
     startClientX: number;
@@ -637,7 +655,7 @@ ${drawLines.join("\n")}
           <div className="gfx-zpl-preview-col">
             <div className="gfx-zpl-canvas-wrap">
               {zplWithUsage ? (
-                <ZplCanvas zpl={zplWithUsage} />
+                <ZplCanvas zpl={zplWithUsage} showNonPrintableZones={showNonPrintableZones} />
               ) : (
                 <p className="muted">Upload image to preview rendered ZPL.</p>
               )}
@@ -656,10 +674,36 @@ ${drawLines.join("\n")}
               <button
                 type="button"
                 className="editor-action-btn"
+                onClick={() => onOpenPreview?.(zplWithUsage)}
+                disabled={!zplWithUsage}
+              >
+                Open in ZPL Preview
+              </button>
+              <button
+                type="button"
+                className="editor-action-btn"
                 onClick={() => onOpenBuilder?.(zplWithUsage)}
                 disabled={!zplWithUsage}
               >
                 Open in Builder
+              </button>
+              <button
+                type="button"
+                className={`editor-action-btn${saved ? " is-active" : ""}`}
+                onClick={() => {
+                  if (!zplWithUsage) {
+                    return;
+                  }
+                  const didSave = onSaveZpl?.(zplWithUsage) ?? false;
+                  if (!didSave) {
+                    return;
+                  }
+                  setSaved(true);
+                  window.setTimeout(() => setSaved(false), 1200);
+                }}
+                disabled={!zplWithUsage}
+              >
+                {saved ? "Saved" : "Save"}
               </button>
             </div>
             <textarea

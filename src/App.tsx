@@ -1,20 +1,21 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+﻿import { useEffect, useMemo, useRef, useState } from "react";
 import { detectAndDecode } from "./core/encoding/detectAndDecode";
 import type { LabelCandidate } from "./core/types";
 import { extractLabels } from "./core/zpl/extractLabels";
 import { LabelBuilderPage } from "./features/builder/LabelBuilderPage";
 import { ZplCodecPage } from "./features/codec/ZplBase64Page";
 import { EditorPanel } from "./features/editor/EditorPanel";
-import { ZplExamplesPanel } from "./features/examples/ZplExamplesPanel";
 import { GraphicToZplPage, type GraphicToZplStoredState } from "./features/graphics/GraphicToZplPage";
 import { LabelTilesPanel } from "./features/import/LabelTilesPanel";
 import { ZipUpload } from "./features/import/ZipUpload";
 import { PreviewPanel } from "./features/preview/PreviewPanel";
+import { SavedZplPage, type SavedZplEntry } from "./features/saved/SavedZplPage";
 
 const DEBOUNCE_MS = 250;
 const LS_PERSIST_KEY = "zplremix.persist_current_zpl";
 const LS_ZPL_KEY = "zplremix.current_zpl";
 const LS_THEME_KEY = "zplremix.theme";
+const LS_SAVED_ZPL_KEY = "zplremix.saved_zpl.items";
 type ThemeMode = "light" | "dark" | "dark-plus" | "abyss";
 
 const SAMPLE_ZPL = `^XA
@@ -76,7 +77,7 @@ function pickBestInitialLabel(labels: LabelCandidate[]): LabelCandidate | null {
 }
 
 export default function App() {
-  const [viewMode, setViewMode] = useState<"preview" | "builder" | "graphics" | "codec">("preview");
+  const [viewMode, setViewMode] = useState<"preview" | "builder" | "graphics" | "codec" | "saved">("preview");
   const [theme, setTheme] = useState<ThemeMode>(() => {
     try {
       const stored = window.localStorage.getItem(LS_THEME_KEY);
@@ -90,6 +91,31 @@ export default function App() {
   });
   const [builderSeedZpl, setBuilderSeedZpl] = useState<string>(SAMPLE_ZPL);
   const [graphicsState, setGraphicsState] = useState<GraphicToZplStoredState | null>(null);
+  const [savedItems, setSavedItems] = useState<SavedZplEntry[]>(() => {
+    try {
+      const raw = window.localStorage.getItem(LS_SAVED_ZPL_KEY);
+      if (!raw) {
+        return [];
+      }
+      const parsed = JSON.parse(raw) as Partial<SavedZplEntry>[];
+      if (!Array.isArray(parsed)) {
+        return [];
+      }
+      return parsed
+        .filter((item): item is SavedZplEntry => (
+          !!item
+          && typeof item.id === "string"
+          && !!item.id
+          && typeof item.name === "string"
+          && typeof item.zpl === "string"
+          && typeof item.createdAt === "string"
+          && typeof item.updatedAt === "string"
+        ))
+        .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+    } catch {
+      return [];
+    }
+  });
   const [persistCurrentZpl, setPersistCurrentZpl] = useState<boolean>(() => {
     try {
       return window.localStorage.getItem(LS_PERSIST_KEY) === "1";
@@ -143,6 +169,14 @@ export default function App() {
     }
   }, [theme]);
 
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(LS_SAVED_ZPL_KEY, JSON.stringify(savedItems));
+    } catch {
+      // Ignore localStorage failures in restricted environments.
+    }
+  }, [savedItems]);
+
   const decoded = useMemo(() => detectAndDecode(debouncedInput), [debouncedInput]);
   const labels = useMemo(
     () => extractLabels(decoded.text, "editor"),
@@ -175,7 +209,9 @@ export default function App() {
         ? "Build, move, and adjust label elements visually."
         : viewMode === "graphics"
           ? "Convert PNG logos to ZPL graphic commands with instant preview."
-        : "Encode and decode ZPL payloads across common transport formats.";
+          : viewMode === "saved"
+            ? "Open, rename, and delete labels saved from ZPL input."
+            : "Encode and decode ZPL payloads across common transport formats.";
 
   useEffect(() => {
     if (!visibleLabels.length) {
@@ -245,14 +281,78 @@ export default function App() {
     setSelectedLabelZplKey(nextZpl.trim());
   };
 
+  const openPreview = (zpl?: string) => {
+    const nextZpl = (zpl ?? "").trim();
+    if (!nextZpl) {
+      setViewMode("preview");
+      return;
+    }
+    setRawInput(nextZpl);
+    setZipLabels([]);
+    setSelectedLabelId(null);
+    setSelectedLabelZplKey(nextZpl);
+    setViewMode("preview");
+  };
+
   const openBuilder = (zpl?: string) => {
     setBuilderSeedZpl(zpl || rawInput || SAMPLE_ZPL);
     setViewMode("builder");
   };
 
+  const saveCurrentZpl = (zplOverride?: string) => {
+    const zpl = (zplOverride ?? rawInput).trim();
+    if (!zpl) {
+      return false;
+    }
+    const now = new Date().toISOString();
+    const next: SavedZplEntry = {
+      id: crypto.randomUUID(),
+      name: `Label ${savedItems.length + 1}`,
+      zpl,
+      createdAt: now,
+      updatedAt: now
+    };
+    setSavedItems((prev) => [next, ...prev]);
+    return true;
+  };
+
+  const openSavedItem = (id: string) => {
+    const entry = savedItems.find((item) => item.id === id);
+    if (!entry) {
+      return;
+    }
+    setRawInput(entry.zpl);
+    setZipLabels([]);
+    setSelectedLabelId(null);
+    setSelectedLabelZplKey(entry.zpl.trim());
+    setViewMode("preview");
+  };
+
+  const renameSavedItem = (id: string, nextName: string) => {
+    const safeName = nextName.trim();
+    if (!safeName) {
+      return;
+    }
+    setSavedItems((prev) =>
+      prev.map((item) =>
+        item.id === id
+          ? { ...item, name: safeName, updatedAt: new Date().toISOString() }
+          : item
+      )
+    );
+  };
+
+  const deleteSavedItem = (id: string) => {
+    setSavedItems((prev) => prev.filter((item) => item.id !== id));
+  };
+
   const closeBuilder = (nextZpl?: string) => {
     if (typeof nextZpl === "string") {
+      const normalized = nextZpl.trim();
       setRawInput(nextZpl);
+      setZipLabels([]);
+      setSelectedLabelId(null);
+      setSelectedLabelZplKey(normalized);
     }
     setViewMode("preview");
   };
@@ -294,6 +394,13 @@ export default function App() {
             >
               ZPL Codec
             </button>
+            <button
+              type="button"
+              className={`app-nav-btn${viewMode === "saved" ? " is-active" : ""}`}
+              onClick={() => setViewMode("saved")}
+            >
+              Saved ZPL
+            </button>
             <div className="app-theme-picker">
               <label htmlFor="theme-select">Theme</label>
               <select
@@ -314,7 +421,7 @@ export default function App() {
       {viewMode === "preview" && (
         <section className="app-grid">
           <div className="left-column">
-            <EditorPanel rawInput={rawInput} onInputChange={setRawInput} />
+            <EditorPanel rawInput={rawInput} onInputChange={setRawInput} onSaveCurrent={saveCurrentZpl} />
             <ZipUpload onLabelsDetected={onZipLabelsDetected} />
             <LabelTilesPanel
               labels={visibleLabels}
@@ -323,7 +430,6 @@ export default function App() {
               showDuplicates={showDuplicateLabels}
               onShowDuplicatesChange={setShowDuplicateLabels}
             />
-            <ZplExamplesPanel onLoadExample={setRawInput} />
           </div>
           <PreviewPanel
             mode={decoded.mode}
@@ -345,12 +451,26 @@ export default function App() {
       {viewMode === "graphics" && (
         <GraphicToZplPage
           onOpenBuilder={openBuilder}
+          onOpenPreview={openPreview}
+          onSaveZpl={saveCurrentZpl}
           initialState={graphicsState}
           onStateChange={setGraphicsState}
         />
       )}
       {viewMode === "codec" && <ZplCodecPage />}
-      <footer className="app-footer">© 2026 Adrian Sarczyński</footer>
+      {viewMode === "saved" && (
+        <SavedZplPage
+          items={savedItems}
+          onOpen={openSavedItem}
+          onRename={renameSavedItem}
+          onDelete={deleteSavedItem}
+        />
+      )}
+      <footer className="app-footer">
+        <p className="app-footer-disclaimer">ZPL is a trademark of Zebra Technologies. This app is not affiliated with Zebra Technologies.</p>
+        <p className="app-footer-author">© 2026 Adrian Sarczyński</p>
+      </footer>
     </main>
   );
 }
+

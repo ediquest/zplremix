@@ -79,7 +79,7 @@ type TextLayout = {
   height: number;
   baseline: number;
   stretch: number;
-  fontWeight: "600" | "700";
+  fontWeight: "500" | "600" | "700";
   family: string;
 };
 
@@ -1501,8 +1501,8 @@ function resolveFontWidthCalibration(sourceName: string): number {
     return 1;
   }
   if (normalized === "A0" || normalized.startsWith("A0")) {
-    // Zebra font 0 is visually more condensed than typical system sans-serif fallback.
-    return 0.88;
+    // Zebra font 0 is noticeably narrower than common desktop fallbacks.
+    return 0.82;
   }
   if (normalized.includes("SWISS") || normalized.includes("HELV")) {
     return 0.94;
@@ -1598,9 +1598,11 @@ function measureTextLayout(
   scale: number,
   fieldBlock: FieldBlockState | null = null
 ): TextLayout {
+  const normalizedSourceName = (font.sourceName ?? "").trim().toUpperCase();
+  const isA0Like = normalizedSourceName === "A0" || normalizedSourceName.startsWith("A0");
   const fontPx = Math.max(9, font.height * scale);
-  const baseLineHeight = fontPx * 1.2;
-  const fontWeight: "600" | "700" = font.bold ? "700" : "600";
+  const baseLineHeight = fontPx * (isA0Like ? 1.15 : 1.2);
+  const fontWeight: "500" | "600" | "700" = font.bold ? "700" : isA0Like ? "500" : "600";
   const widthCalibration = resolveFontWidthCalibration(font.sourceName);
   const stretch = clamp((font.width / Math.max(1, font.height)) * widthCalibration, 0.55, 1.6);
   const family = font.family || "'Segoe UI', Arial, sans-serif";
@@ -1646,7 +1648,7 @@ function measureTextLayout(
     lineHeight,
     width,
     height: Math.max(lineHeight, Math.max(1, lines.length) * lineHeight),
-    baseline: fontPx * 0.8,
+    baseline: fontPx * (isA0Like ? 0.78 : 0.8),
     stretch,
     fontWeight,
     family
@@ -2545,7 +2547,7 @@ function drawBarcodeField(
       const textY = barcode.showTextAbove
         ? 0
         : layout.symbolOffsetY + layout.symbolHeight + layout.textGap;
-      ctx.font = `600 ${layout.textHeight}px 'Courier New', monospace`;
+      ctx.font = `500 ${layout.textHeight}px 'Courier New', monospace`;
       ctx.fillStyle = reverse ? "#ffffff" : TEXT_INK_COLOR;
       ctx.textBaseline = "top";
       const textWidth = ctx.measureText(layout.printedText).width;

@@ -23,6 +23,7 @@ type BuilderElementType =
   | "line-v"
   | "line-d"
   | "box"
+  | "shade"
   | "circle"
   | "ellipse";
 type BarcodeElementType = "code128" | "gs1128" | "itf14" | "code39" | "pdf417" | "qr" | "datamatrix" | "ean13";
@@ -106,6 +107,9 @@ const QR_COMPAT_OFFSET_Y = 12;
 const QR_PREVIEW_DRAW_ADJUST = 0.4;
 const QR_EFFECTIVE_SIZE_MAX = 293;
 const DATAMATRIX_EFFECTIVE_SIZE_MAX = 299;
+const TABLE_META_PREFIX = "ZPLRMX_TABLE";
+const SHADE_META_PREFIX = "ZPLRMX_SHADE";
+const TABLE_LAYOUT_TEMPLATES = ["2x2", "3x2", "3x3", "4x2", "4x3", "4x4", "6x3", "6x4"] as const;
 const DEFAULT_CANVAS_SETTINGS: BuilderCanvasSettings = {
   densityDpmm: 8,
   labelWidth: 4,
@@ -295,6 +299,9 @@ function createItem(type: BuilderElementType, x: number, y: number, zIndex: numb
   if (type === "line-d") {
     return { id: crypto.randomUUID(), type, x, y, width: 220, height: 120, text: "R", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
   }
+  if (type === "shade") {
+    return { id: crypto.randomUUID(), type, x, y, width: 200, height: 120, text: "55", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
+  }
   if (type === "circle") {
     return { id: crypto.randomUUID(), type, x, y, width: 120, height: 120, text: "", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
   }
@@ -414,6 +421,51 @@ function parseTableSpec(text: string): { rows: number; cols: number } {
   const rows = clamp(Number(match?.[1] ?? 3), 1, 24);
   const cols = clamp(Number(match?.[2] ?? 2), 1, 24);
   return { rows, cols };
+}
+
+function toTableSpecText(text: string): string {
+  const { rows, cols } = parseTableSpec(text);
+  return `${rows}x${cols}`;
+}
+
+function normalizeShadePercent(text: string): number {
+  const parsed = Number.parseInt((text ?? "").trim(), 10);
+  if (!Number.isFinite(parsed)) {
+    return 55;
+  }
+  return clamp(Math.round(parsed), 10, 90);
+}
+
+function buildShadeGfa(width: number, height: number, shadePercent: number): string {
+  const safeWidth = Math.max(8, Math.round(width));
+  const safeHeight = Math.max(8, Math.round(height));
+  const bytesPerRow = Math.ceil(safeWidth / 8);
+  const totalBytes = bytesPerRow * safeHeight;
+  const threshold = clamp(shadePercent, 10, 90) / 100;
+  const bayer4x4 = [
+    [0, 8, 2, 10],
+    [12, 4, 14, 6],
+    [3, 11, 1, 9],
+    [15, 7, 13, 5]
+  ];
+  const chunks: string[] = [];
+  for (let y = 0; y < safeHeight; y += 1) {
+    for (let byteIndex = 0; byteIndex < bytesPerRow; byteIndex += 1) {
+      let value = 0;
+      for (let bit = 0; bit < 8; bit += 1) {
+        const x = byteIndex * 8 + bit;
+        if (x >= safeWidth) {
+          continue;
+        }
+        const matrixValue = bayer4x4[y % 4][x % 4] / 16;
+        if (matrixValue < threshold) {
+          value |= 1 << (7 - bit);
+        }
+      }
+      chunks.push(value.toString(16).toUpperCase().padStart(2, "0"));
+    }
+  }
+  return `^GFA,${totalBytes},${totalBytes},${bytesPerRow},${chunks.join("")}`;
 }
 
 function normalizeGraphicNameFromFilename(filename: string): string {
@@ -711,6 +763,8 @@ function buildZplFromItems(
     const x = Math.round(item.x);
     const y = Math.round(item.y);
     const canReuseSource =
+      item.type !== "table"
+      &&
       !!item.sourceCommand
       && typeof item.sourceBody === "string"
       && item.sourceFingerprint === buildItemFingerprint(item)
@@ -753,15 +807,24 @@ function buildZplFromItems(
       const width = Math.max(12, Math.round(item.width));
       const height = Math.max(12, Math.round(item.height));
       const { rows, cols } = parseTableSpec(item.text);
-      lines.push(`^FO${x},${y}^GB${width},${height},2^FS`);
+      const meta = `^FX${TABLE_META_PREFIX},${rows},${cols}`;
+      lines.push(`^FO${x},${y}^GB${width},${height},2${meta},OUTER^FS`);
       for (let col = 1; col < cols; col += 1) {
         const xLine = x + Math.round((width * col) / cols);
-        lines.push(`^FO${xLine},${y}^GB1,${height},1^FS`);
+        lines.push(`^FO${xLine},${y}^GB1,${height},1${meta},V^FS`);
       }
       for (let row = 1; row < rows; row += 1) {
         const yLine = y + Math.round((height * row) / rows);
-        lines.push(`^FO${x},${yLine}^GB${width},1,1^FS`);
+        lines.push(`^FO${x},${yLine}^GB${width},1,1${meta},H^FS`);
       }
+      return;
+    }
+    if (item.type === "shade") {
+      const width = Math.max(8, Math.round(item.width));
+      const height = Math.max(8, Math.round(item.height));
+      const shadePercent = normalizeShadePercent(item.text);
+      const meta = `^FX${SHADE_META_PREFIX},${shadePercent}`;
+      lines.push(`^FO${x},${y}${meta}${buildShadeGfa(width, height, shadePercent)}^FS`);
       return;
     }
     if (item.type === "code128") {
@@ -877,6 +940,26 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
       });
     };
 
+    const shadeMeta = new RegExp(`\\^FX${SHADE_META_PREFIX},(\\d{1,3})`, "i").exec(body);
+    if (shadeMeta && /\^GF/i.test(body)) {
+      const gfSize = parseGraphicFieldSize(body) ?? { width: 120, height: 80 };
+      const shadePercent = normalizeShadePercent(shadeMeta[1] ?? "55");
+      pushParsed({
+        id: crypto.randomUUID(),
+        type: "shade",
+        x: rawX,
+        y: rawY,
+        width: gfSize.width,
+        height: gfSize.height,
+        text: String(shadePercent),
+        filled: false,
+        zIndex: items.length,
+        font: "0",
+        orientation: "N"
+      });
+      continue;
+    }
+
     if (/\^GF/i.test(body)) {
       const gfSize = parseGraphicFieldSize(body) ?? { width: 64, height: 16 };
       pushParsed({
@@ -892,6 +975,22 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
         font: "0",
         orientation: fieldOrientation
       });
+
+      // Some PRN streams place following commands (e.g. ^BY/^FT/^BC/^FD)
+      // directly after ^GF data without a dedicated ^FS. Recover those
+      // commands as separate editable items.
+      const gfSegment = /\^GF[^^]*/i.exec(body);
+      const trailing = gfSegment ? body.slice(gfSegment.index + gfSegment[0].length).trim() : "";
+      if (trailing && /\^(FO|FT)\b/i.test(trailing)) {
+        const recovered = parseItemsFromZpl(`^XA\n${trailing}\n^XZ`);
+        recovered.forEach((entry) => {
+          items.push({
+            ...entry,
+            id: crypto.randomUUID(),
+            zIndex: items.length
+          });
+        });
+      }
       continue;
     }
 
@@ -928,6 +1027,31 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
     }
 
     const gb = /\^GB(\d+),(\d+)(?:,(\d+))?/i.exec(body);
+    const tableMeta = new RegExp(`\\^FX${TABLE_META_PREFIX},(\\d+),(\\d+),(OUTER|V|H)`, "i").exec(body);
+    if (tableMeta) {
+      const part = (tableMeta[3] ?? "").toUpperCase();
+      if (part !== "OUTER") {
+        continue;
+      }
+      const rows = clamp(Number(tableMeta[1] ?? 3), 1, 24);
+      const cols = clamp(Number(tableMeta[2] ?? 2), 1, 24);
+      const width = Math.max(12, Number(gb?.[1] ?? 320));
+      const height = Math.max(12, Number(gb?.[2] ?? 160));
+      pushParsed({
+        id: crypto.randomUUID(),
+        type: "table",
+        x: rawX,
+        y: rawY,
+        width,
+        height,
+        text: `${rows}x${cols}`,
+        filled: false,
+        zIndex: items.length,
+        font: "0",
+        orientation: "N"
+      });
+      continue;
+    }
     if (gb) {
       const width = Math.max(2, Number(gb[1]));
       const height = Math.max(2, Number(gb[2]));
@@ -1012,7 +1136,7 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
     }
 
     if (/\^BQ/i.test(body)) {
-      const fd = /\^FD(?:[A-Z]{1,2},)?([^\\^]*)/i.exec(body);
+      const fd = /\^FD(?:[A-Z]{1,2},)?([^^]*)/i.exec(body);
       const payload = fd?.[1] ?? "https://zplremix.local";
       const bqn = /\^BQ([NRIB])?(?:,[12])?(?:,(\d+))?/i.exec(body);
       const orientation = normalizeOrientation(bqn?.[1]);
@@ -1035,7 +1159,7 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
     }
 
     if (/\^BX/i.test(body)) {
-      const fd = /\^FD([^\\^]*)/i.exec(body);
+      const fd = /\^FD([^^]*)/i.exec(body);
       const bxArgs = parseZplCommandArgs(body, "BX");
       const orientation = normalizeOrientation(bxArgs[0] || fieldOrientation);
       const moduleWidth = clamp(Number(bxArgs[1] ?? 5), 1, 12);
@@ -1058,7 +1182,7 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
     }
 
     if (/\^BE/i.test(body)) {
-      const fd = /\^FD([^\\^]*)/i.exec(body);
+      const fd = /\^FD([^^]*)/i.exec(body);
       const byArgs = parseZplCommandArgs(body, "BY");
       const byModule = clamp(Number(byArgs[0] ?? 2), 1, 10);
       const byHeight = parseBarcodeHeight(["", byArgs[2] ?? ""], 100);
@@ -1092,7 +1216,7 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
     }
 
     if (/\^B7/i.test(body)) {
-      const fd = /\^FD([^\\^]*)/i.exec(body);
+      const fd = /\^FD([^^]*)/i.exec(body);
       const b7Args = parseZplCommandArgs(body, "B7");
       const orientation = normalizeOrientation(b7Args[0] || fieldOrientation);
       const colWidth = Number(b7Args[1] ?? 4);
@@ -1124,7 +1248,7 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
     }
 
     if (/\^B2/i.test(body)) {
-      const fd = /\^FD([^\\^]*)/i.exec(body);
+      const fd = /\^FD([^^]*)/i.exec(body);
       const byArgs = parseZplCommandArgs(body, "BY");
       const byModule = clamp(Number(byArgs[0] ?? 2), 1, 10);
       const byHeight = parseBarcodeHeight(["", byArgs[2] ?? ""], 100);
@@ -1158,7 +1282,7 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
     }
 
     if (/\^B3/i.test(body)) {
-      const fd = /\^FD([^\\^]*)/i.exec(body);
+      const fd = /\^FD([^^]*)/i.exec(body);
       const byArgs = parseZplCommandArgs(body, "BY");
       const byModule = clamp(Number(byArgs[0] ?? 2), 1, 10);
       const byHeight = parseBarcodeHeight(["", byArgs[2] ?? ""], 100);
@@ -1192,7 +1316,7 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
     }
 
     if (/\^BC/i.test(body)) {
-      const fd = /\^FD([^\\^]*)/i.exec(body);
+      const fd = /\^FD([^^]*)/i.exec(body);
       const byArgs = parseZplCommandArgs(body, "BY");
       const byModule = clamp(Number(byArgs[0] ?? 2), 1, 10);
       const byHeight = parseBarcodeHeight(["", byArgs[2] ?? ""], 100);
@@ -1225,15 +1349,18 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
       continue;
     }
 
-    const fd = /\^FD([^\\^]*)/i.exec(body);
-    if (fd) {
+    const fd = /\^FD([^^]*)/i.exec(body);
+    const serial = /\^SN([^,\^]+)/i.exec(body);
+    const serialSeed = (serial?.[1] ?? "").trim();
+    const textPayload = fd?.[1] ?? (serialSeed.length ? serialSeed : "");
+    if (textPayload.length) {
       const a = /\^A([A-Z0-9])([NRIB])?,?(-?\d*)?,?(-?\d*)?/i.exec(body);
       const font = ((a?.[1] ?? "0").toUpperCase() as ZplFont);
       const orientation = normalizeOrientation(a?.[2] ?? fieldOrientation);
       const h = Number(a?.[3] || 32);
       const w = Number(a?.[4] || 0);
       const textWidthRatio = h > 0 && w > 0 ? clamp(w / h, 0.2, 1.5) : 0.6;
-      const width = estimateTextBoxWidth(fd[1], h, w, font);
+      const width = estimateTextBoxWidth(textPayload, h, w, font);
       const height = Math.max(16, Math.round(h));
       const position = mapFieldPosition(
         command,
@@ -1250,7 +1377,7 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
         y: position.y,
         width: position.width,
         height: position.height,
-        text: fd[1],
+        text: textPayload,
         textWidthRatio,
         filled: false,
         zIndex: items.length,
@@ -1267,6 +1394,7 @@ function isContentEditableType(type: BuilderElementType): boolean {
     type === "text" ||
     type === "graphic" ||
     type === "table" ||
+    type === "shade" ||
     type === "code128" ||
     type === "gs1128" ||
     type === "itf14" ||
@@ -1294,6 +1422,16 @@ function isBarcodeElementType(type: BuilderElementType): boolean {
 function normalizeEan13(value: string): string {
   const digits = (value ?? "").replace(/\D/g, "");
   return digits.length >= 12 ? digits.slice(0, 13) : "5901234123457";
+}
+
+function sanitizeCode128ForBuilder(value: string): string {
+  const raw = (value ?? "").trim();
+  if (!raw) {
+    return "0";
+  }
+  const withoutZplControl = raw.replace(/>([:;689])/g, "");
+  const cleaned = withoutZplControl.replace(/[^\x20-\x7E]/g, "");
+  return cleaned || "0";
 }
 
 function estimateQrBoxSize(text: string, magnification: number): { width: number; height: number } {
@@ -1382,10 +1520,12 @@ function BuilderBarcodePreview({ item }: { item: BuilderItem }) {
       if (item.type === "code128") {
         options.bcid = "code128";
         options.parsefnc = true;
+        options.text = sanitizeCode128ForBuilder(item.text);
       } else if (item.type === "gs1128") {
         options.bcid = "code128";
         const gs1Payload = item.text || "(00)012345678901234567";
-        options.text = gs1Payload.startsWith(">8") ? gs1Payload : `>8${gs1Payload}`;
+        const normalizedGs1 = gs1Payload.startsWith(">8") ? gs1Payload : `>8${gs1Payload}`;
+        options.text = sanitizeCode128ForBuilder(normalizedGs1);
         options.parsefnc = true;
       } else if (item.type === "itf14") {
         options.bcid = "interleaved2of5";
@@ -1407,7 +1547,20 @@ function BuilderBarcodePreview({ item }: { item: BuilderItem }) {
         options.bcid = "ean13";
         options.text = normalizeEan13(item.text);
       }
-      bwipjs.toCanvas(temp, options as unknown as Parameters<typeof bwipjs.toCanvas>[1]);
+      try {
+        bwipjs.toCanvas(temp, options as unknown as Parameters<typeof bwipjs.toCanvas>[1]);
+      } catch {
+        if (item.type === "code128" || item.type === "gs1128") {
+          const retryOptions = {
+            ...options,
+            parsefnc: false,
+            text: sanitizeCode128ForBuilder(item.text)
+          };
+          bwipjs.toCanvas(temp, retryOptions as unknown as Parameters<typeof bwipjs.toCanvas>[1]);
+        } else {
+          throw new Error("Barcode preview render failed.");
+        }
+      }
       target.width = targetW;
       target.height = targetH;
       const ctx = target.getContext("2d");
@@ -1478,6 +1631,9 @@ function getMinSizeForType(type: BuilderElementType): { width: number; height: n
   if (type === "table") {
     return { width: 64, height: 48 };
   }
+  if (type === "shade") {
+    return { width: 16, height: 16 };
+  }
   return { width: 12, height: 12 };
 }
 
@@ -1509,8 +1665,9 @@ function getItemMaxPosition(item: BuilderItem, canvasWidth: number, canvasHeight
     };
   }
   return {
-    x: canvasWidth - Math.max(12, item.width),
-    y: canvasHeight - Math.max(12, item.height)
+    // If element is larger than canvas, keep origin at 0 instead of going negative/off-canvas.
+    x: Math.max(0, canvasWidth - Math.max(12, item.width)),
+    y: Math.max(0, canvasHeight - Math.max(12, item.height))
   };
 }
 
@@ -1630,6 +1787,85 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     () => buildZplFromItems(items, canvasWidth, canvasHeight, allGraphicDownloads, allGraphicSizes),
     [items, canvasWidth, canvasHeight, allGraphicDownloads, allGraphicSizes]
   );
+  const generatedZplLines = useMemo(() => generatedZpl.split("\n"), [generatedZpl]);
+  const selectedGeneratedLineIndex = useMemo(() => {
+    if (!selectedItem) {
+      return -1;
+    }
+    const x = Math.round(selectedItem.x);
+    const y = Math.round(selectedItem.y);
+    const canReuseSource =
+      selectedItem.type !== "table"
+      && !!selectedItem.sourceCommand
+      && typeof selectedItem.sourceBody === "string"
+      && selectedItem.sourceFingerprint === buildItemFingerprint(selectedItem)
+      && Number.isFinite(selectedItem.sourceAnchorX)
+      && Number.isFinite(selectedItem.sourceAnchorY)
+      && Number.isFinite(selectedItem.sourceViewX)
+      && Number.isFinite(selectedItem.sourceViewY);
+
+    if (canReuseSource) {
+      const dx = Math.round(selectedItem.x - (selectedItem.sourceViewX ?? selectedItem.x));
+      const dy = Math.round(selectedItem.y - (selectedItem.sourceViewY ?? selectedItem.y));
+      const nextX = Math.max(0, Math.round((selectedItem.sourceAnchorX ?? x) + dx));
+      const nextY = Math.max(0, Math.round((selectedItem.sourceAnchorY ?? y) + dy));
+      const prefix = `^${selectedItem.sourceCommand}${nextX},${nextY}`;
+      return generatedZplLines.findIndex((line) => line.startsWith(prefix));
+    }
+
+    if (selectedItem.type === "text") {
+      return generatedZplLines.findIndex((line) => line.startsWith(`^FO${x},${y}^A${selectedItem.font}${selectedItem.orientation},`));
+    }
+    if (selectedItem.type === "graphic") {
+      return generatedZplLines.findIndex((line) => line.startsWith(`^FO${x},${y}^XG`));
+    }
+    if (selectedItem.type === "table") {
+      return generatedZplLines.findIndex((line) => line.startsWith(`^FO${x},${y}^GB`));
+    }
+    if (selectedItem.type === "shade") {
+      return generatedZplLines.findIndex((line) => line.startsWith(`^FO${x},${y}^FX${SHADE_META_PREFIX},`));
+    }
+    if (selectedItem.type === "code128" || selectedItem.type === "gs1128") {
+      return generatedZplLines.findIndex((line) => line.startsWith(`^FO${x},${y}^BY`) && /\^BC/i.test(line));
+    }
+    if (selectedItem.type === "itf14") {
+      return generatedZplLines.findIndex((line) => line.startsWith(`^FO${x},${y}^BY`) && /\^B2/i.test(line));
+    }
+    if (selectedItem.type === "code39") {
+      return generatedZplLines.findIndex((line) => line.startsWith(`^FO${x},${y}^BY`) && /\^B3/i.test(line));
+    }
+    if (selectedItem.type === "pdf417") {
+      return generatedZplLines.findIndex((line) => line.startsWith(`^FO${x},${y}^B7`));
+    }
+    if (selectedItem.type === "qr") {
+      return generatedZplLines.findIndex((line) => line.startsWith(`^FO`) && /\^BQ/i.test(line) && line.includes(`^FDLA,${selectedItem.text}`));
+    }
+    if (selectedItem.type === "datamatrix") {
+      return generatedZplLines.findIndex((line) => line.startsWith(`^FO${x},${y}^BX`));
+    }
+    if (selectedItem.type === "ean13") {
+      return generatedZplLines.findIndex((line) => line.startsWith(`^FO${x},${y}^BY`) && /\^BE/i.test(line));
+    }
+    if (selectedItem.type === "line") {
+      return generatedZplLines.findIndex((line) => line.startsWith(`^FO${x},${y}^GB`));
+    }
+    if (selectedItem.type === "line-v") {
+      return generatedZplLines.findIndex((line) => line.startsWith(`^FO${x},${y}^GB`));
+    }
+    if (selectedItem.type === "line-d") {
+      return generatedZplLines.findIndex((line) => line.startsWith(`^FO${x},${y}^GD`));
+    }
+    if (selectedItem.type === "circle") {
+      return generatedZplLines.findIndex((line) => line.startsWith(`^FO${x},${y}^GC`));
+    }
+    if (selectedItem.type === "ellipse") {
+      return generatedZplLines.findIndex((line) => line.startsWith(`^FO${x},${y}^GE`));
+    }
+    if (selectedItem.type === "box") {
+      return generatedZplLines.findIndex((line) => line.startsWith(`^FO${x},${y}^GB`));
+    }
+    return -1;
+  }, [generatedZplLines, selectedItem]);
   const sizeRange =
     canvasSettings.labelUnit === "in"
       ? { min: 1, max: 12, step: 0.1 }
@@ -1737,6 +1973,11 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     setItems((prev) =>
       prev.map((item) => {
         if (item.type !== "text") {
+          return item;
+        }
+        // Keep imported source fields bit-exact; otherwise source reuse breaks
+        // and FT/rotated fields are re-emitted as approximated FO text.
+        if (item.sourceCommand && item.sourceFingerprint) {
           return item;
         }
         const normalizedWidth = estimateTextBoxWidth(
@@ -2632,6 +2873,9 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                     <button type="button" draggable onDragStart={(e) => onPaletteDragStart(e, "table")}>
                       Table Block
                     </button>
+                    <button type="button" draggable onDragStart={(e) => onPaletteDragStart(e, "shade")}>
+                      Shaded Box
+                    </button>
                     <button type="button" draggable onDragStart={(e) => onPaletteDragStart(e, "graphic")}>
                       Graphic XG
                     </button>
@@ -2727,8 +2971,34 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                   )}
                   {isContentEditableType(selectedItem.type) && (
                     <label>
-                      {selectedItem.type === "table" ? "Rows x Cols" : selectedItem.type === "graphic" ? "Graphic Name" : "Content"}
+                      {selectedItem.type === "table"
+                        ? "Rows x Cols"
+                        : selectedItem.type === "graphic"
+                          ? "Graphic Name"
+                          : selectedItem.type === "shade"
+                            ? "Shade % (10-90)"
+                            : "Content"}
                       <input type="text" value={selectedItem.text} onChange={(e) => updateSelected({ text: e.target.value })} />
+                    </label>
+                  )}
+                  {selectedItem.type === "table" && (
+                    <label>
+                      Table Template
+                      <select
+                        value={TABLE_LAYOUT_TEMPLATES.includes(toTableSpecText(selectedItem.text) as typeof TABLE_LAYOUT_TEMPLATES[number])
+                          ? toTableSpecText(selectedItem.text)
+                          : "custom"}
+                        onChange={(e) => {
+                          if (e.target.value !== "custom") {
+                            updateSelected({ text: e.target.value });
+                          }
+                        }}
+                      >
+                        <option value="custom">Custom (manual)</option>
+                        {TABLE_LAYOUT_TEMPLATES.map((template) => (
+                          <option key={template} value={template}>{template}</option>
+                        ))}
+                      </select>
                     </label>
                   )}
                   {selectedItem.type === "graphic" && (
@@ -2956,6 +3226,17 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                               `repeating-linear-gradient(0deg, transparent 0, transparent calc(${100 / rows}% - 1px), rgba(31,44,63,0.35) calc(${100 / rows}% - 1px), rgba(31,44,63,0.35) calc(${100 / rows}%))`
                           };
                         })()
+                    : item.type === "shade"
+                      ? (() => {
+                          const shadePercent = normalizeShadePercent(item.text);
+                          const alpha = Math.max(0.12, Math.min(0.82, shadePercent / 100));
+                          return {
+                            backgroundImage:
+                              `repeating-linear-gradient(90deg, rgba(31,44,63,${alpha}) 0, rgba(31,44,63,${alpha}) 1px, transparent 1px, transparent 2px), ` +
+                              `repeating-linear-gradient(0deg, rgba(31,44,63,${alpha * 0.65}) 0, rgba(31,44,63,${alpha * 0.65}) 1px, transparent 1px, transparent 2px)`,
+                            backgroundColor: "rgba(255,255,255,0.9)"
+                          };
+                        })()
                     : {})
                 }}
                 onMouseDown={(e) => onItemMouseDown(e, item)}
@@ -3001,6 +3282,9 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                 {item.type === "table" && (
                   <span className="builder-item-passthrough-label">TABLE {parseTableSpec(item.text).rows}x{parseTableSpec(item.text).cols}</span>
                 )}
+                {item.type === "shade" && (
+                  <span className="builder-item-passthrough-label">SHADE {normalizeShadePercent(item.text)}%</span>
+                )}
                 {isBarcodeElementType(item.type) && <BuilderBarcodePreview item={item} />}
                 {!item.locked && <span className="builder-item-resize-handle builder-item-resize-handle-right" onMouseDown={(e) => onResizeHandleMouseDown(e, item, "right")} />}
                 {!item.locked && <span className="builder-item-resize-handle builder-item-resize-handle-bottom" onMouseDown={(e) => onResizeHandleMouseDown(e, item, "bottom")} />}
@@ -3022,7 +3306,16 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
               <span className="builder-zpl-accordion-icon" aria-hidden>{zplAccordionOpen === "generated" ? "-" : "+"}</span>
             </button>
             <div className="builder-zpl-accordion-body">
-              <textarea value={generatedZpl} readOnly />
+              <pre className="builder-generated-zpl-view" aria-label="Generated ZPL">
+                {generatedZplLines.map((line, index) => (
+                  <span
+                    key={`generated-line-${index}`}
+                    className={`builder-generated-zpl-line${index === selectedGeneratedLineIndex ? " is-linked" : ""}`}
+                  >
+                    {line || " "}
+                  </span>
+                ))}
+              </pre>
             </div>
           </section>
           <section className={`builder-zpl-accordion${zplAccordionOpen === "loaded" ? " is-open" : ""}`}>

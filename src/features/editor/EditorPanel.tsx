@@ -3,6 +3,7 @@ import { useMemo, useRef, useState } from "react";
 type EditorPanelProps = {
   rawInput: string;
   onInputChange: (next: string) => void;
+  onSaveCurrent?: () => boolean;
 };
 
 function renderPlainWithNumbers(text: string, keyPrefix: string) {
@@ -110,11 +111,12 @@ function beautifyZpl(source: string) {
   return lines.join("\n");
 }
 
-export function EditorPanel({ rawInput, onInputChange }: EditorPanelProps) {
+export function EditorPanel({ rawInput, onInputChange, onSaveCurrent }: EditorPanelProps) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const highlightRef = useRef<HTMLPreElement>(null);
   const [wrapEnabled, setWrapEnabled] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [saved, setSaved] = useState(false);
   const highlighted = useMemo(() => renderHighlightedZpl(rawInput), [rawInput]);
 
   const syncScroll = () => {
@@ -127,6 +129,15 @@ export function EditorPanel({ rawInput, onInputChange }: EditorPanelProps) {
 
   const handleBeautify = () => {
     onInputChange(beautifyZpl(rawInput));
+  };
+
+  const handleSave = () => {
+    const didSave = onSaveCurrent?.() ?? false;
+    if (!didSave) {
+      return;
+    }
+    setSaved(true);
+    window.setTimeout(() => setSaved(false), 1200);
   };
 
   const handleCopy = async () => {
@@ -166,6 +177,14 @@ export function EditorPanel({ rawInput, onInputChange }: EditorPanelProps) {
           </button>
           <button type="button" className="editor-action-btn" onClick={handleBeautify}>
             Beautify
+          </button>
+          <button
+            type="button"
+            className={`editor-action-btn${saved ? " is-active" : ""}`}
+            onClick={handleSave}
+            disabled={!rawInput.trim()}
+          >
+            {saved ? "Saved" : "Save"}
           </button>
         </div>
       </div>
