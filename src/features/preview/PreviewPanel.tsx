@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { Ref } from "react";
 import { jsPDF } from "jspdf";
 import type { LabelCandidate, PrinterSettings, PrintDensityDpmm, PrintQuality, LabelUnit } from "../../core/types";
 import { ZplCanvas, renderLabelForExport } from "./ZplCanvas";
@@ -11,7 +12,10 @@ type PreviewPanelProps = {
   theme: "light" | "dark" | "dark-plus" | "abyss";
   labels: LabelCandidate[];
   selectedLabelId: string | null;
+  sectionRef?: Ref<HTMLElement>;
+  onSelectLabelByIndex?: (index: number) => void;
   onOpenBuilder: (zpl?: string) => void;
+  onReplaceSelectedZpl: (nextZpl: string) => void;
   persistCurrentZpl: boolean;
   onPersistCurrentZplChange: (enabled: boolean) => void;
 };
@@ -19,10 +23,13 @@ type PreviewPanelProps = {
 type PersistedPreviewSettings = {
   showNonPrintableZones: boolean;
   respectZplGeometry: boolean;
+  qrLegacyOffset: boolean;
+  printMethod: "direct-thermal" | "thermal-transfer";
   printerSettings: PrinterSettings;
   printEngineOverrideEnabled: boolean;
   printEngineDarkness: number;
   printEngineSpeedIps: number;
+  printHeadPressure: number;
 };
 
 const DEFAULT_PRINTER_SETTINGS: PrinterSettings = {
@@ -56,10 +63,13 @@ function loadPersistedSettings(): PersistedPreviewSettings {
       return {
         showNonPrintableZones: true,
         respectZplGeometry: true,
+        qrLegacyOffset: false,
+        printMethod: "direct-thermal",
         printerSettings: DEFAULT_PRINTER_SETTINGS,
         printEngineOverrideEnabled: false,
         printEngineDarkness: 0,
-        printEngineSpeedIps: 4
+        printEngineSpeedIps: 4,
+        printHeadPressure: 0
       };
     }
     const parsed = JSON.parse(raw) as Partial<PersistedPreviewSettings>;
@@ -76,6 +86,8 @@ function loadPersistedSettings(): PersistedPreviewSettings {
     return {
       showNonPrintableZones: parsed.showNonPrintableZones ?? true,
       respectZplGeometry: parsed.respectZplGeometry ?? true,
+      qrLegacyOffset: parsed.qrLegacyOffset ?? false,
+      printMethod: parsed.printMethod === "thermal-transfer" ? "thermal-transfer" : "direct-thermal",
       printEngineOverrideEnabled: parsed.printEngineOverrideEnabled ?? false,
       printEngineDarkness: Number.isFinite(parsed.printEngineDarkness)
         ? Math.max(-30, Math.min(30, Number(parsed.printEngineDarkness)))
@@ -83,6 +95,9 @@ function loadPersistedSettings(): PersistedPreviewSettings {
       printEngineSpeedIps: Number.isFinite(parsed.printEngineSpeedIps)
         ? Math.max(1, Math.min(14, Number(parsed.printEngineSpeedIps)))
         : 4,
+      printHeadPressure: Number.isFinite(parsed.printHeadPressure)
+        ? Math.max(-10, Math.min(10, Number(parsed.printHeadPressure)))
+        : 0,
       printerSettings: {
         model: typeof source.model === "string" ? source.model : DEFAULT_PRINTER_SETTINGS.model,
         densityDpmm: density,
@@ -99,12 +114,41 @@ function loadPersistedSettings(): PersistedPreviewSettings {
     return {
       showNonPrintableZones: true,
       respectZplGeometry: true,
+      qrLegacyOffset: false,
+      printMethod: "direct-thermal",
       printerSettings: DEFAULT_PRINTER_SETTINGS,
       printEngineOverrideEnabled: false,
       printEngineDarkness: 0,
-      printEngineSpeedIps: 4
+      printEngineSpeedIps: 4,
+      printHeadPressure: 0
     };
   }
+}
+
+function stripEngineCommands(zpl: string): string {
+  return (zpl ?? "")
+    .replace(/\^MD[^^~\r\n]*/gi, "")
+    .replace(/\^PR[^^~\r\n]*/gi, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function formatPrValue(value: number): string {
+  const rounded = Math.round(value * 10) / 10;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+}
+
+function withEngineCommands(zpl: string, darkness: number, speedIps: number): string {
+  const cleaned = stripEngineCommands(zpl);
+  const md = `^MD${Math.round(darkness)}`;
+  const pr = `^PR${formatPrValue(speedIps)}`;
+  const xaMatch = /\^XA/i.exec(cleaned);
+  if (!xaMatch) {
+    return `^XA\n${md}\n${pr}\n${cleaned}\n^XZ`;
+  }
+  const insertAt = xaMatch.index + xaMatch[0].length;
+  return `${cleaned.slice(0, insertAt)}\n${md}\n${pr}${cleaned.slice(insertAt)}`;
 }
 
 export function PreviewPanel({
@@ -112,7 +156,10 @@ export function PreviewPanel({
   theme,
   labels,
   selectedLabelId,
+  sectionRef,
+  onSelectLabelByIndex,
   onOpenBuilder,
+  onReplaceSelectedZpl,
   persistCurrentZpl,
   onPersistCurrentZplChange
 }: PreviewPanelProps) {
@@ -121,9 +168,12 @@ export function PreviewPanel({
   const [diagnostics, setDiagnostics] = useState<ZplDiagnostic[]>([]);
   const [showNonPrintableZones, setShowNonPrintableZones] = useState(persisted.showNonPrintableZones);
   const [respectZplGeometry, setRespectZplGeometry] = useState(persisted.respectZplGeometry);
+  const [qrLegacyOffset, setQrLegacyOffset] = useState(persisted.qrLegacyOffset);
+  const [printMethod, setPrintMethod] = useState<"direct-thermal" | "thermal-transfer">(persisted.printMethod);
   const [printEngineOverrideEnabled, setPrintEngineOverrideEnabled] = useState(persisted.printEngineOverrideEnabled);
   const [printEngineDarkness, setPrintEngineDarkness] = useState(persisted.printEngineDarkness);
   const [printEngineSpeedIps, setPrintEngineSpeedIps] = useState(persisted.printEngineSpeedIps);
+  const [printHeadPressure, setPrintHeadPressure] = useState(persisted.printHeadPressure);
   const [printerSettings, setPrinterSettings] = useState<PrinterSettings>(persisted.printerSettings);
   const [canvasRotationDeg, setCanvasRotationDeg] = useState(0);
   const [baseCanvasSize, setBaseCanvasSize] = useState({ width: 0, height: 0 });
@@ -133,6 +183,10 @@ export function PreviewPanel({
   const previewWrapRef = useRef<HTMLDivElement>(null);
   const selectedLabel =
     labels.find((label) => label.id === selectedLabelId) ?? labels[0] ?? null;
+  const totalLabelCount = Math.max(1, labels.length);
+  const selectedLabelPosition = selectedLabel
+    ? Math.max(1, labels.findIndex((label) => label.id === selectedLabel.id) + 1)
+    : 1;
 
   useEffect(() => {
     if (!selectedLabel) {
@@ -146,9 +200,12 @@ export function PreviewPanel({
       const payload: PersistedPreviewSettings = {
         showNonPrintableZones,
         respectZplGeometry,
+        qrLegacyOffset,
+        printMethod,
         printEngineOverrideEnabled,
         printEngineDarkness,
         printEngineSpeedIps,
+        printHeadPressure,
         printerSettings
       };
       window.localStorage.setItem(LS_PREVIEW_SETTINGS_KEY, JSON.stringify(payload));
@@ -158,10 +215,13 @@ export function PreviewPanel({
   }, [
     printerSettings,
     respectZplGeometry,
+    qrLegacyOffset,
+    printMethod,
     showNonPrintableZones,
     printEngineOverrideEnabled,
     printEngineDarkness,
-    printEngineSpeedIps
+    printEngineSpeedIps,
+    printHeadPressure
   ]);
 
   const onDensityChange = (density: PrintDensityDpmm) => {
@@ -186,18 +246,12 @@ export function PreviewPanel({
     setPrinterSettings((prev) => ({ ...prev, labelUnit: unit }));
   };
 
-  const onShowLabelChange = (key: "showLabelIndex" | "showLabelCount", value: number) => {
-    const safe = Number.isFinite(value) ? Math.max(1, Math.round(value)) : 1;
-    setPrinterSettings((prev) => {
-      if (key === "showLabelCount") {
-        return {
-          ...prev,
-          showLabelCount: safe,
-          showLabelIndex: Math.min(prev.showLabelIndex, safe)
-        };
-      }
-      return { ...prev, showLabelIndex: Math.min(safe, prev.showLabelCount) };
-    });
+  const onShowLabelIndexInput = (value: number) => {
+    if (!Number.isFinite(value) || !onSelectLabelByIndex) {
+      return;
+    }
+    const safe = Math.max(1, Math.min(totalLabelCount, Math.round(value)));
+    onSelectLabelByIndex(safe);
   };
 
   const sizeRange =
@@ -213,9 +267,11 @@ export function PreviewPanel({
     () => ({
       enabled: printEngineOverrideEnabled,
       darkness: printEngineDarkness,
-      speedIps: printEngineSpeedIps
+      speedIps: printEngineSpeedIps,
+      headPressure: printHeadPressure,
+      printMethod
     }),
-    [printEngineOverrideEnabled, printEngineDarkness, printEngineSpeedIps]
+    [printEngineOverrideEnabled, printEngineDarkness, printEngineSpeedIps, printHeadPressure, printMethod]
   );
   const labelPaperColor = theme === "light" ? "#ffffff" : theme === "dark" ? "#e3e6eb" : theme === "dark-plus" ? "#d9dde3" : "#d3d8df";
 
@@ -246,7 +302,8 @@ export function PreviewPanel({
       selectedLabel.zpl,
       printerSettings,
       respectZplGeometry,
-      printEngineOverride
+      printEngineOverride,
+      qrLegacyOffset
     );
     exportCanvas.toBlob((blob) => {
       if (!blob) return;
@@ -260,7 +317,8 @@ export function PreviewPanel({
       selectedLabel.zpl,
       printerSettings,
       respectZplGeometry,
-      printEngineOverride
+      printEngineOverride,
+      qrLegacyOffset
     );
     const imageData = exportCanvas.toDataURL("image/png");
     const pdf = new jsPDF({
@@ -270,6 +328,20 @@ export function PreviewPanel({
     });
     pdf.addImage(imageData, "PNG", 0, 0, exportCanvas.width, exportCanvas.height);
     pdf.save(`${baseName}.pdf`);
+  };
+
+  const applyEngineCommandsToZpl = () => {
+    if (!selectedLabel) {
+      return;
+    }
+    onReplaceSelectedZpl(withEngineCommands(selectedLabel.zpl, printEngineDarkness, printEngineSpeedIps));
+  };
+
+  const removeEngineCommandsFromZpl = () => {
+    if (!selectedLabel) {
+      return;
+    }
+    onReplaceSelectedZpl(stripEngineCommands(selectedLabel.zpl));
   };
 
   const downloadJson = () => {
@@ -355,7 +427,7 @@ export function PreviewPanel({
   }, []);
 
   return (
-    <section className="panel preview-panel">
+    <section ref={sectionRef} className="panel preview-panel">
       <div className="panel-header preview-header">
         <h2>Preview</h2>
         <p className="preview-mode">Detected mode: {mode}</p>
@@ -375,6 +447,7 @@ export function PreviewPanel({
                 showNonPrintableZones={showNonPrintableZones}
                 respectZplGeometry={respectZplGeometry}
                 printEngineOverride={printEngineOverride}
+                qrLegacyOffset={qrLegacyOffset}
               />
             </div>
           </div>
@@ -546,15 +619,18 @@ export function PreviewPanel({
             <input
               type="number"
               min={1}
-              value={printerSettings.showLabelIndex}
-              onChange={(e) => onShowLabelChange("showLabelIndex", Number(e.target.value))}
+              max={totalLabelCount}
+              value={selectedLabelPosition}
+              onChange={(e) => onShowLabelIndexInput(Number(e.target.value))}
             />
             <span className="printer-of">of</span>
             <input
               type="number"
               min={1}
-              value={printerSettings.showLabelCount}
-              onChange={(e) => onShowLabelChange("showLabelCount", Number(e.target.value))}
+              value={totalLabelCount}
+              disabled
+              readOnly
+              aria-label="Total label count"
             />
           </div>
         </div>
@@ -584,6 +660,18 @@ export function PreviewPanel({
         </div>
 
         <div className="printer-row printer-row-toggle">
+          <label htmlFor="qr-legacy-offset">QR Legacy Offset</label>
+          <div className="printer-controls">
+            <input
+              id="qr-legacy-offset"
+              type="checkbox"
+              checked={qrLegacyOffset}
+              onChange={(e) => setQrLegacyOffset(e.target.checked)}
+            />
+          </div>
+        </div>
+
+        <div className="printer-row printer-row-toggle">
           <label htmlFor="engine-override">Override ^MD/^PR for preview</label>
           <div className="printer-controls">
             <input
@@ -598,6 +686,22 @@ export function PreviewPanel({
         <div className="printer-row printer-row-size">
           <label>Print Engine:</label>
           <div className="printer-controls size-controls">
+            <div className="size-line">
+              <span>M</span>
+              <select
+                value={printMethod}
+                onChange={(e) => setPrintMethod(e.target.value as "direct-thermal" | "thermal-transfer")}
+              >
+                <option value="direct-thermal">Direct Thermal</option>
+                <option value="thermal-transfer">Thermal Transfer</option>
+              </select>
+              <input
+                type="text"
+                value={printMethod === "direct-thermal" ? "DT" : "TT"}
+                readOnly
+                disabled
+              />
+            </div>
             <div className="size-line">
               <span>MD</span>
               <input
@@ -639,6 +743,48 @@ export function PreviewPanel({
                 onChange={(e) => setPrintEngineSpeedIps(Number(e.target.value))}
                 disabled={!printEngineOverrideEnabled}
               />
+            </div>
+            <div className="size-line">
+              <span>HP</span>
+              <input
+                type="range"
+                min={-10}
+                max={10}
+                step={1}
+                value={printHeadPressure}
+                onChange={(e) => setPrintHeadPressure(Number(e.target.value))}
+                disabled={!printEngineOverrideEnabled}
+              />
+              <input
+                type="number"
+                min={-10}
+                max={10}
+                step={1}
+                value={printHeadPressure}
+                onChange={(e) => setPrintHeadPressure(Number(e.target.value))}
+                disabled={!printEngineOverrideEnabled}
+              />
+            </div>
+            <p className="muted">
+              Note: option 3 (HP) is preview-only head pressure simulation, not a real ZPL command.
+            </p>
+            <div className="codec-text-actions">
+              <button
+                type="button"
+                className="editor-action-btn"
+                onClick={applyEngineCommandsToZpl}
+                disabled={!selectedLabel}
+              >
+                Apply MD/PR to ZPL
+              </button>
+              <button
+                type="button"
+                className="editor-action-btn"
+                onClick={removeEngineCommandsFromZpl}
+                disabled={!selectedLabel}
+              >
+                Remove MD/PR
+              </button>
             </div>
           </div>
         </div>

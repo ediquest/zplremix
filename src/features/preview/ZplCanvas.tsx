@@ -16,8 +16,11 @@ type ZplCanvasProps = {
     enabled: boolean;
     darkness: number;
     speedIps: number;
+    headPressure: number;
+    printMethod: "direct-thermal" | "thermal-transfer";
   };
   labelPaperColor?: string;
+  qrLegacyOffset?: boolean;
 };
 
 type Orientation = "N" | "R" | "I" | "B";
@@ -76,7 +79,7 @@ type TextLayout = {
   height: number;
   baseline: number;
   stretch: number;
-  fontWeight: "500" | "700";
+  fontWeight: "600" | "700";
   family: string;
 };
 
@@ -194,15 +197,17 @@ type Rect = {
 type PrintEngineState = {
   darkness: number;
   speedIps: number;
+  headPressure: number;
+  printMethod: "direct-thermal" | "thermal-transfer";
 };
 
 const LABEL_WIDTH = 812;
 const LABEL_HEIGHT = 1218;
 const PADDING = 24;
 const CODE128_QUIET_MODULES = 2;
-const QR_DRAW_ADJUST = 0.50;
-const QR_X_SHIFT_DOTS = 18;
-const QR_Y_SHIFT_DOTS = 72;
+const QR_DRAW_ADJUST = 0.4;
+const QR_X_SHIFT_DOTS = 0;
+const TEXT_INK_COLOR = "#000000";
 
 const DEFAULT_PRINTER_SETTINGS: PrinterSettings = {
   model: "Zebra GK420d",
@@ -1303,10 +1308,32 @@ function applyPrintEngineSimulation(
     return;
   }
 
-  const speedPenalty = clamp((engine.speedIps - 4) / 10, 0, 1);
-  const darknessGain = clamp(1 + (engine.darkness / 30) * 0.5 - speedPenalty * 0.12, 0.55, 1.7);
-  const verticalSpread = speedPenalty * 0.32;
-  const needsPass = Math.abs(engine.darkness) > 0.001 || speedPenalty > 0.001;
+  const speedDeltaNormalized = clamp((engine.speedIps - 4) / 10, -1, 1);
+  const pressureNormalized = clamp(engine.headPressure / 10, -1, 1);
+  const isDirectThermal = engine.printMethod === "direct-thermal";
+  const fastPenalty = Math.max(0, speedDeltaNormalized);
+  const slowBoost = Math.max(0, -speedDeltaNormalized);
+  const darknessGain = clamp(
+    1
+      + (engine.darkness / 30) * 0.55
+      - fastPenalty * 0.26
+      + slowBoost * 0.18
+      + pressureNormalized * 0.34
+      + (isDirectThermal ? -0.16 : 0.16),
+    0.45,
+    1.95
+  );
+  const verticalSpread = clamp(
+    Math.abs(speedDeltaNormalized) * 0.58
+      + Math.abs(pressureNormalized) * 0.18
+      + (isDirectThermal ? 0.22 : 0),
+    0,
+    0.82
+  );
+  const needsPass =
+    Math.abs(engine.darkness) > 0.001
+    || Math.abs(speedDeltaNormalized) > 0.001
+    || Math.abs(pressureNormalized) > 0.001;
   if (!needsPass) {
     return;
   }
@@ -1330,18 +1357,88 @@ function applyPrintEngineSimulation(
       }
 
       let adjustedLum = clamp(lum / darknessGain, 0, 1);
-      if (verticalSpread > 0 && row + 1 < height) {
-        const nextOffset = offset + rowStride;
+      if (verticalSpread > 0) {
+        const neighborRow =
+          speedDeltaNormalized >= 0
+            ? Math.min(height - 1, row + 1)
+            : Math.max(0, row - 1);
+        const nextOffset = neighborRow * rowStride + col * 4;
         const nextLum =
           (data[nextOffset] * 0.299 + data[nextOffset + 1] * 0.587 + data[nextOffset + 2] * 0.114)
           / 255;
         adjustedLum = adjustedLum * (1 - verticalSpread) + Math.min(adjustedLum, nextLum) * verticalSpread;
+      }
+      if (speedDeltaNormalized > 0) {
+        adjustedLum = clamp(adjustedLum + speedDeltaNormalized * 0.08, 0, 1);
+      } else if (speedDeltaNormalized < 0) {
+        adjustedLum = clamp(adjustedLum - Math.abs(speedDeltaNormalized) * 0.08, 0, 1);
+      }
+      if (pressureNormalized > 0) {
+        adjustedLum = clamp(adjustedLum - pressureNormalized * 0.1, 0, 1);
+      } else if (pressureNormalized < 0) {
+        adjustedLum = clamp(adjustedLum + Math.abs(pressureNormalized) * 0.1, 0, 1);
+      }
+      if (isDirectThermal) {
+        const noiseSeed = (row * 1103515245 + col * 12345) & 1023;
+        const noise = ((noiseSeed / 1023) - 0.5) * 0.16;
+        adjustedLum = clamp(adjustedLum + noise + 0.04, 0, 1);
+      } else {
+        // Thermal transfer: cleaner, more stable dots (slightly crisper contrast).
+        adjustedLum = clamp(0.5 + (adjustedLum - 0.5) * 0.82 - 0.03, 0, 1);
       }
       const gray = Math.round(adjustedLum * 255);
       data[offset] = gray;
       data[offset + 1] = gray;
       data[offset + 2] = gray;
     }
+  }
+
+  ctx.putImageData(imageData, x, y);
+}
+
+function applyBinaryPrintQuality(ctx: CanvasRenderingContext2D, labelRect: Rect) {
+  const x = Math.max(0, Math.floor(labelRect.x));
+  const y = Math.max(0, Math.floor(labelRect.y));
+  const width = Math.max(1, Math.floor(labelRect.width));
+  const height = Math.max(1, Math.floor(labelRect.height));
+  if (width <= 1 || height <= 1) {
+    return;
+  }
+
+  const imageData = ctx.getImageData(x, y, width, height);
+  const data = imageData.data;
+  let paperR = 255;
+  let paperG = 255;
+  let paperB = 255;
+
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] === 0) {
+      continue;
+    }
+    paperR = data[i];
+    paperG = data[i + 1];
+    paperB = data[i + 2];
+    break;
+  }
+
+  const threshold = 0.76;
+  for (let i = 0; i < data.length; i += 4) {
+    const alpha = data[i + 3];
+    if (alpha === 0) {
+      continue;
+    }
+    const lum = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) / 255;
+    if (lum >= threshold) {
+      data[i] = paperR;
+      data[i + 1] = paperG;
+      data[i + 2] = paperB;
+      data[i + 3] = 255;
+      continue;
+    }
+    data[i] = 0;
+    data[i + 1] = 0;
+    data[i + 2] = 0;
+    data[i + 3] = 255;
   }
 
   ctx.putImageData(imageData, x, y);
@@ -1378,6 +1475,9 @@ function resolveFontFamily(sourceName: string): string {
   if (!normalized) {
     return "'Segoe UI', Arial, sans-serif";
   }
+  if (normalized === "A0" || normalized.startsWith("A0")) {
+    return "'Arial Narrow', 'Liberation Sans Narrow', 'Helvetica Neue', Arial, sans-serif";
+  }
   if (
     normalized.includes("OCR")
     || normalized.includes("MONO")
@@ -1393,6 +1493,21 @@ function resolveFontFamily(sourceName: string): string {
     return "'Times New Roman', Times, serif";
   }
   return "'Segoe UI', Arial, sans-serif";
+}
+
+function resolveFontWidthCalibration(sourceName: string): number {
+  const normalized = sourceName.trim().toUpperCase();
+  if (!normalized) {
+    return 1;
+  }
+  if (normalized === "A0" || normalized.startsWith("A0")) {
+    // Zebra font 0 is visually more condensed than typical system sans-serif fallback.
+    return 0.88;
+  }
+  if (normalized.includes("SWISS") || normalized.includes("HELV")) {
+    return 0.94;
+  }
+  return 1;
 }
 
 const BUILTIN_FONT_IDS = new Set([
@@ -1485,8 +1600,9 @@ function measureTextLayout(
 ): TextLayout {
   const fontPx = Math.max(9, font.height * scale);
   const baseLineHeight = fontPx * 1.2;
-  const fontWeight: "500" | "700" = font.bold ? "700" : "500";
-  const stretch = clamp(font.width / Math.max(1, font.height), 0.65, 1.6);
+  const fontWeight: "600" | "700" = font.bold ? "700" : "600";
+  const widthCalibration = resolveFontWidthCalibration(font.sourceName);
+  const stretch = clamp((font.width / Math.max(1, font.height)) * widthCalibration, 0.55, 1.6);
   const family = font.family || "'Segoe UI', Arial, sans-serif";
 
   ctx.save();
@@ -1814,6 +1930,7 @@ function encodeCode128(value: string, mode: "N" | "U" | "A"): { codes: number[];
     }
 
     const digitRun = countDigitRun(tokens, index);
+    // For ^BC mode N Zebra does not auto-optimize to Set C; keep explicit control codes only.
     const canUseSetC = mode !== "N" && digitRun >= 4;
     if (canUseSetC) {
       dataCodes.push(codeSetC);
@@ -2047,6 +2164,10 @@ function render2dBarcode(
   const baseScale =
     barcode.kind === "qr"
       ? barcode.qrMagnification
+      : barcode.kind === "datamatrix"
+        // bwip-js datamatrix scale renders noticeably larger than Zebra ^BX module width.
+        // Calibrate down to better match printer output proportions.
+        ? barcode.moduleWidth * scale * 0.5
       : barcode.kind === "maxicode"
         ? barcode.moduleWidth * barcode.qrMagnification * scale
         : barcode.moduleWidth * scale;
@@ -2120,15 +2241,16 @@ function renderEan13Barcode(
   const symbolCanvas = document.createElement("canvas");
   const text = normalizeEan13Value(value);
   const symbolScale = Math.max(1, Math.min(8, Math.round(barcode.moduleWidth * scale)));
-  const barHeight = Math.max(8, Math.round((barcode.height * scale) / 6));
+  // bwip-js uses physical units for height; map ZPL dots to a closer visual equivalent.
+  const barHeight = Math.max(6, Math.round((barcode.height * scale) / 8));
+  const showText = barcode.showText;
   try {
     bwipjs.toCanvas(symbolCanvas, {
       bcid: "ean13",
       text,
       scale: symbolScale,
       height: barHeight,
-      includetext: barcode.showText,
-      textxalign: "center",
+      includetext: showText,
       parse: true,
       parsefnc: false,
       paddingwidth: 0,
@@ -2144,12 +2266,41 @@ function renderEan13Barcode(
   }
 }
 
+function detectBarcodeLeftEdge(canvas: HTMLCanvasElement): number {
+  const ctx = canvas.getContext("2d");
+  if (!ctx || canvas.width <= 0 || canvas.height <= 0) {
+    return 0;
+  }
+  const scanHeight = Math.max(1, Math.floor(canvas.height * 0.72));
+  const imageData = ctx.getImageData(0, 0, canvas.width, scanHeight);
+  const { data, width, height } = imageData;
+  for (let x = 0; x < width; x += 1) {
+    for (let y = 0; y < height; y += 1) {
+      const offset = (y * width + x) * 4;
+      if (data[offset + 3] < 20) {
+        continue;
+      }
+      if (data[offset] <= 70 && data[offset + 1] <= 70 && data[offset + 2] <= 70) {
+        return x;
+      }
+    }
+  }
+  return 0;
+}
+
 function buildBarcodeLayout(value: string, barcode: BarcodeState, scale: number): BarcodeLayout {
-  const moduleWidth = Math.max(1, barcode.moduleWidth * scale);
+  const rawModuleWidth = Math.max(1, barcode.moduleWidth * scale);
+  const moduleWidth =
+    barcode.kind === "code128"
+      ? rawModuleWidth * 1.08
+      : rawModuleWidth;
   const barHeight = Math.max(24, barcode.height * scale);
-  const textHeight = barcode.showText && barcode.kind !== "qr"
-    ? Math.max(8, Math.min(11, barHeight * 0.16))
-    : 0;
+  const textHeight =
+    barcode.showText && barcode.kind !== "qr"
+      ? barcode.kind === "code128"
+        ? Math.max(14, Math.min(32, barHeight * 0.22))
+        : Math.max(12, Math.min(26, barHeight * 0.2))
+      : 0;
   const textGap = textHeight > 0 ? Math.max(2, 3 * scale) : 0;
 
   if (barcode.kind === "code39") {
@@ -2246,7 +2397,7 @@ function drawTextField(
       : { x: 0, y: anchorY };
 
   drawAtAnchor(ctx, x, y, font.orientation, localAnchor.x, localAnchor.y, () => {
-    ctx.fillStyle = reverse ? "#ffffff" : "#111827";
+    ctx.fillStyle = reverse ? "#ffffff" : TEXT_INK_COLOR;
     drawTextLayout(ctx, layout);
   });
   return orientedAabb(x, y, font.orientation, localAnchor.x, localAnchor.y, layout.width, layout.height);
@@ -2261,7 +2412,8 @@ function drawBarcodeField(
   positionMode: PositionMode,
   scale: number,
   reverse: boolean,
-  addWarning: (message: string) => void
+  addWarning: (message: string) => void,
+  qrLegacyOffset = false
 ): Rect | null {
   if (barcode.kind === "ean13") {
     const symbolCanvas = renderEan13Barcode(value, barcode, scale, reverse, addWarning);
@@ -2270,17 +2422,24 @@ function drawBarcodeField(
     }
     const symbolWidth = symbolCanvas.width;
     const symbolHeight = symbolCanvas.height;
+    const eanLeftEdge = detectBarcodeLeftEdge(symbolCanvas);
+    const drawX = positionMode === "FO" ? x - eanLeftEdge : x;
+    const drawY = y;
     const localAnchor =
       positionMode === "FO"
         ? foLocalAnchor(barcode.orientation, symbolWidth, symbolHeight)
         : { x: 0, y: symbolHeight };
-    drawAtAnchor(ctx, x, y, barcode.orientation, localAnchor.x, localAnchor.y, () => {
+    drawAtAnchor(ctx, drawX, drawY, barcode.orientation, localAnchor.x, localAnchor.y, () => {
+      if (reverse) {
+        ctx.fillStyle = "#111827";
+        ctx.fillRect(0, 0, symbolWidth, symbolHeight);
+      }
       ctx.imageSmoothingEnabled = false;
       ctx.drawImage(symbolCanvas, 0, 0, symbolWidth, symbolHeight);
     });
     return orientedAabb(
-      x,
-      y,
+      drawX,
+      drawY,
       barcode.orientation,
       localAnchor.x,
       localAnchor.y,
@@ -2307,7 +2466,7 @@ function drawBarcodeField(
       symbolWidth = Math.max(1, snapToPixel(symbolCanvas.width * scale * QR_DRAW_ADJUST));
       symbolHeight = Math.max(1, snapToPixel(symbolCanvas.height * scale * QR_DRAW_ADJUST));
       drawX += QR_X_SHIFT_DOTS * scale;
-      drawY += QR_Y_SHIFT_DOTS * scale;
+      drawY += (qrLegacyOffset ? 12 : 0) * scale;
     }
     const localAnchor =
       positionMode === "FO"
@@ -2386,18 +2545,11 @@ function drawBarcodeField(
       const textY = barcode.showTextAbove
         ? 0
         : layout.symbolOffsetY + layout.symbolHeight + layout.textGap;
-      const isSmallCode128 = barcode.kind === "code128" && layout.barHeight <= 90;
-      ctx.font = `${layout.textHeight}px 'Courier New', monospace`;
+      ctx.font = `600 ${layout.textHeight}px 'Courier New', monospace`;
+      ctx.fillStyle = reverse ? "#ffffff" : TEXT_INK_COLOR;
       ctx.textBaseline = "top";
       const textWidth = ctx.measureText(layout.printedText).width;
-      const baseTextX = Math.max(0, (layout.symbolWidth - textWidth) / 2);
-      const smallCode128Nudge = isSmallCode128 ? layout.moduleWidth * 24 : 0;
-      const textX = isSmallCode128
-        ? Math.max(0, baseTextX + smallCode128Nudge)
-        : Math.min(
-          Math.max(0, layout.symbolWidth - textWidth),
-          baseTextX + smallCode128Nudge
-        );
+      const textX = Math.max(0, (layout.symbolWidth - textWidth) / 2);
       ctx.fillText(layout.printedText, textX, textY);
     }
   });
@@ -2667,7 +2819,10 @@ function drawZplPreview(
     enabled: boolean;
     darkness: number;
     speedIps: number;
-  }
+    headPressure: number;
+    printMethod: "direct-thermal" | "thermal-transfer";
+  },
+  qrLegacyOffset = false
 ): DrawResult {
   const ctx = canvas.getContext("2d");
   if (!ctx) {
@@ -2729,12 +2884,11 @@ function drawZplPreview(
     ctx.fillRect(0, 0, width, height);
   }
   if (
-    renderOptions.withChrome
-    && showNonPrintableZones
+    showNonPrintableZones
     && marginsDots.left + marginsDots.right + marginsDots.top + marginsDots.bottom > 0
   ) {
     ctx.save();
-    ctx.fillStyle = "rgba(239, 68, 68, 0.08)";
+    ctx.fillStyle = "rgba(239, 68, 68, 0.18)";
     if (printableRect.y > labelRect.y) {
       ctx.fillRect(labelRect.x, labelRect.y, labelRect.width, printableRect.y - labelRect.y);
     }
@@ -2751,6 +2905,11 @@ function drawZplPreview(
     if (printableRight < labelRight) {
       ctx.fillRect(printableRight, printableRect.y, labelRight - printableRight, printableRect.height);
     }
+    ctx.strokeStyle = "rgba(220, 38, 38, 0.6)";
+    ctx.lineWidth = Math.max(1, scale);
+    ctx.setLineDash([Math.max(2, scale * 2), Math.max(2, scale * 2)]);
+    ctx.strokeRect(printableRect.x, printableRect.y, printableRect.width, printableRect.height);
+    ctx.setLineDash([]);
     ctx.restore();
   }
 
@@ -2766,7 +2925,7 @@ function drawZplPreview(
   let labelReverse = false;
   let printWidth = geometry.printWidth;
   let labelLength = geometry.labelLength;
-  let printEngine: PrintEngineState = { darkness: 0, speedIps: 4 };
+  let printEngine: PrintEngineState = { darkness: 0, speedIps: 4, headPressure: 0, printMethod: "direct-thermal" };
   let fieldReverse = false;
   let latestCode128Debug: Code128DebugInfo | null = null;
   let encoding: EncodingMode = "cp1252";
@@ -2810,9 +2969,6 @@ function drawZplPreview(
         message
       });
       diagnosticKeys.add(key);
-    }
-    if (severity !== "info") {
-      warningSet.add(`L${line} ^${command}: ${message}`);
     }
   };
   const addWarning = (message: string) => {
@@ -2876,7 +3032,7 @@ function drawZplPreview(
     );
   }
   if (printerSettings.quality === "binary") {
-    addDiagnostic("Binary print quality enabled (preview remains anti-aliased).", {
+    addDiagnostic("Binary print quality enabled (thresholded black/white preview).", {
       line: 1,
       command: "PROFILE",
       severity: "info",
@@ -3027,7 +3183,8 @@ function drawZplPreview(
       drawPositionMode,
       scale,
       drawReverse,
-      addWarning
+      addWarning,
+      qrLegacyOffset
     );
     checkPlacement(bounds);
   };
@@ -3782,14 +3939,23 @@ function drawZplPreview(
     printEngineOverride?.enabled
       ? {
           darkness: clamp(printEngineOverride.darkness, -30, 30),
-          speedIps: clamp(printEngineOverride.speedIps, 1, 14)
+          speedIps: clamp(printEngineOverride.speedIps, 1, 14),
+          headPressure: clamp(printEngineOverride.headPressure, -10, 10),
+          printMethod: printEngineOverride.printMethod
         }
       : printEngine;
   applyPrintEngineSimulation(ctx, labelRect, effectiveEngine);
-  if (Math.abs(effectiveEngine.darkness) > 0.001 || Math.abs(effectiveEngine.speedIps - 4) > 0.001) {
+  if (printerSettings.quality === "binary") {
+    applyBinaryPrintQuality(ctx, labelRect);
+  }
+  if (
+    Math.abs(effectiveEngine.darkness) > 0.001
+    || Math.abs(effectiveEngine.speedIps - 4) > 0.001
+    || Math.abs(effectiveEngine.headPressure) > 0.001
+  ) {
     const source = printEngineOverride?.enabled ? "override" : "zpl";
     addDiagnostic(
-      `Print engine simulation applied (${source}: ^MD=${effectiveEngine.darkness}, ^PR=${effectiveEngine.speedIps.toFixed(1)} ips).`,
+      `Print engine simulation applied (${source}: M=${effectiveEngine.printMethod}, ^MD=${effectiveEngine.darkness}, ^PR=${effectiveEngine.speedIps.toFixed(1)} ips, HP(sim)=${effectiveEngine.headPressure}).`,
       {
         line: 1,
         command: "ENGINE",
@@ -3815,7 +3981,10 @@ export function renderLabelForExport(
     enabled: boolean;
     darkness: number;
     speedIps: number;
-  }
+    headPressure: number;
+    printMethod: "direct-thermal" | "thermal-transfer";
+  },
+  qrLegacyOffset = false
 ): HTMLCanvasElement {
   const workingZpl = sanitizeLikelyZplSyntaxIssues(zpl).zpl;
   const tokens = tokenizeZplCommands(workingZpl);
@@ -3830,7 +3999,8 @@ export function renderLabelForExport(
     false,
     respectZplGeometry,
     { withChrome: false, fitToCanvas: false, textScale: 1, labelPaperColor: "#ffffff" },
-    printEngineOverride
+    printEngineOverride,
+    qrLegacyOffset
   );
   return canvas;
 }
@@ -3845,7 +4015,8 @@ export function ZplCanvas({
   showNonPrintableZones = true,
   respectZplGeometry = true,
   printEngineOverride,
-  labelPaperColor = "#ffffff"
+  labelPaperColor = "#ffffff",
+  qrLegacyOffset = false
 }: ZplCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -3865,7 +4036,8 @@ export function ZplCanvas({
       showNonPrintableZones,
       respectZplGeometry,
       { withChrome: false, fitToCanvas: false, textScale: 1, labelPaperColor },
-      printEngineOverride
+      printEngineOverride,
+      qrLegacyOffset
     );
     if (onCode128DebugChange) {
       onCode128DebugChange(result.code128Debug);
@@ -3889,6 +4061,7 @@ export function ZplCanvas({
     showNonPrintableZones,
     labelPaperColor,
     printEngineOverride,
+    qrLegacyOffset,
     zpl
   ]);
 

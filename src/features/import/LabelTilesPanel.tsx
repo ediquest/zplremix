@@ -6,6 +6,8 @@ type LabelTilesPanelProps = {
   labels: LabelCandidate[];
   selectedLabelId: string | null;
   onSelectLabel: (id: string) => void;
+  showDuplicates: boolean;
+  onShowDuplicatesChange: (enabled: boolean) => void;
 };
 
 const THUMB_WIDTH = 210;
@@ -50,7 +52,13 @@ function buildThumbnailDataUrl(zpl: string): string {
   return thumbCanvas.toDataURL("image/png");
 }
 
-export function LabelTilesPanel({ labels, selectedLabelId, onSelectLabel }: LabelTilesPanelProps) {
+export function LabelTilesPanel({
+  labels,
+  selectedLabelId,
+  onSelectLabel,
+  showDuplicates,
+  onShowDuplicatesChange
+}: LabelTilesPanelProps) {
   const [thumbMap, setThumbMap] = useState<Record<string, string>>({});
   const signature = useMemo(
     () => labels.map((item) => `${item.id}:${item.zpl.length}`).join("|"),
@@ -74,14 +82,24 @@ export function LabelTilesPanel({ labels, selectedLabelId, onSelectLabel }: Labe
       <div className="panel-header">
         <h2>Labels</h2>
         <p className="muted">{labels.length ? `${labels.length} detected` : "No labels detected yet"}</p>
+        <label className="label-tiles-toggle">
+          <input
+            type="checkbox"
+            checked={showDuplicates}
+            onChange={(event) => onShowDuplicatesChange(event.target.checked)}
+          />
+          Show duplicates
+        </label>
       </div>
       {!labels.length ? (
         <div className="empty-state">Import a file or paste multi-label ZPL to see label cards here.</div>
       ) : (
         <div className="label-tiles-grid">
-          {labels.map((item) => (
+          {labels.map((item, index) => {
+            const tileKey = `${item.id}:${index}`;
+            return (
             <button
-              key={item.id}
+              key={tileKey}
               type="button"
               className={`label-tile${selectedLabelId === item.id ? " is-active" : ""}`}
               onClick={() => onSelectLabel(item.id)}
@@ -91,12 +109,12 @@ export function LabelTilesPanel({ labels, selectedLabelId, onSelectLabel }: Labe
               ) : (
                 <div className="label-tile-image is-placeholder">Preview</div>
               )}
-              <span className="label-tile-meta">{item.source} #{item.index}</span>
+              <span className="label-tile-meta">{item.source} #{item.index}{labels.length > 1 ? ` (${index + 1})` : ""}</span>
             </button>
-          ))}
+            );
+          })}
         </div>
       )}
     </section>
   );
 }
-

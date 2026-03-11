@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent, type MouseEvent } from "react";
 import bwipjs from "bwip-js";
 
 type LabelBuilderPageProps = {
@@ -9,6 +9,8 @@ type LabelBuilderPageProps = {
 type BuilderElementType =
   | "passthrough"
   | "text"
+  | "graphic"
+  | "table"
   | "code128"
   | "gs1128"
   | "itf14"
@@ -38,6 +40,9 @@ type BuilderItem = {
   width: number;
   height: number;
   text: string;
+  textWidthRatio?: number;
+  locked?: boolean;
+  hidden?: boolean;
   filled: boolean;
   zIndex: number;
   font: ZplFont;
@@ -73,6 +78,11 @@ type DragSnapshot = {
   y: number;
 };
 
+type BuilderGuideLine = {
+  axis: "x" | "y";
+  value: number;
+};
+
 type PrintDensityDpmm = 8 | 12 | 24;
 type LabelUnit = "in" | "mm" | "cm";
 
@@ -83,10 +93,19 @@ type BuilderCanvasSettings = {
   labelUnit: LabelUnit;
 };
 
+type UploadedGraphic = {
+  name: string;
+  command: string;
+  width: number;
+  height: number;
+};
+
 const LS_PREVIEW_SETTINGS_KEY = "zplremix.preview.settings";
-const QR_COMPAT_OFFSET_X = 18;
-const QR_COMPAT_OFFSET_Y = 72;
-const QR_PREVIEW_DRAW_ADJUST = 0.5;
+const QR_COMPAT_OFFSET_X = 0;
+const QR_COMPAT_OFFSET_Y = 12;
+const QR_PREVIEW_DRAW_ADJUST = 0.4;
+const QR_EFFECTIVE_SIZE_MAX = 293;
+const DATAMATRIX_EFFECTIVE_SIZE_MAX = 299;
 const DEFAULT_CANVAS_SETTINGS: BuilderCanvasSettings = {
   densityDpmm: 8,
   labelWidth: 4,
@@ -138,25 +157,105 @@ function unitToMm(value: number, unit: LabelUnit): number {
   return value;
 }
 
-function estimateTextBoxWidth(text: string, fontHeight: number): number {
+function estimateTextBoxWidth(text: string, fontHeight: number, fontWidth?: number, font: ZplFont = "0"): number {
   const safeHeight = Math.max(12, fontHeight);
-  const perChar = Math.max(5, Math.round(safeHeight * 0.42));
-  const padding = Math.max(8, Math.round(safeHeight * 0.45));
-  return Math.max(22, Math.round(text.length * perChar + padding));
+  const textHeight = Math.max(10, Math.round(safeHeight * 0.8));
+  const payload = text || " ";
+  const widthFromZpl = Number.isFinite(fontWidth) ? Number(fontWidth) : NaN;
+  const ratioFromZpl = Number.isFinite(widthFromZpl) && widthFromZpl > 0
+    ? clamp(widthFromZpl / Math.max(1, textHeight), 0.2, 1.5)
+    : 1;
+  const fallbackPerChar = Number.isFinite(widthFromZpl) && widthFromZpl > 0
+    ? Math.max(4, Math.round(widthFromZpl * 0.72))
+    : Math.max(5, Math.round(textHeight * 0.56));
+  let measured = payload.length * fallbackPerChar;
+  if (typeof document !== "undefined") {
+    try {
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        ctx.font = `700 ${textHeight}px ${resolveBuilderTextFontFamily(font)}`;
+        measured = Math.max(measured * 0.6, ctx.measureText(payload).width);
+      }
+    } catch {
+      // no-op: keep fallback measurement
+    }
+  }
+  const padding = Math.max(6, Math.round(textHeight * 0.35));
+  const widthCalibration = resolveBuilderTextWidthCalibration(font);
+  const widthScale = widthCalibration * ratioFromZpl;
+  return Math.max(22, Math.round(measured * widthScale + padding));
+}
+
+function estimateTextBoxHeightFromWidth(text: string, width: number): number {
+  const chars = Math.max(1, (text ?? "").length);
+  const factor = Math.max(0.87, chars * 0.42 + 0.45);
+  return Math.max(16, Math.round(width / factor));
+}
+
+function resolveBuilderTextFontFamily(font: ZplFont): string {
+  const normalized = (font ?? "0").toUpperCase();
+  if (normalized === "0") {
+    return "'Arial Narrow', 'Liberation Sans Narrow', 'Helvetica Neue', Arial, sans-serif";
+  }
+  return "'Segoe UI', Tahoma, Geneva, Verdana, sans-serif";
+}
+
+function resolveBuilderTextWidthCalibration(font: ZplFont): number {
+  const normalized = (font ?? "0").toUpperCase();
+  return normalized === "0" ? 0.88 : 1;
 }
 
 function createItem(type: BuilderElementType, x: number, y: number, zIndex: number): BuilderItem {
   if (type === "text") {
     const text = "New text";
     const height = 32;
+    const font: ZplFont = "0";
     return {
       id: crypto.randomUUID(),
       type,
       x,
       y,
-      width: estimateTextBoxWidth(text, height),
+      width: estimateTextBoxWidth(text, height, undefined, font),
       height,
       text,
+      textWidthRatio: 0.6,
+      locked: false,
+      hidden: false,
+      filled: false,
+      zIndex,
+      font,
+      orientation: "N"
+    };
+  }
+  if (type === "graphic") {
+    return {
+      id: crypto.randomUUID(),
+      type,
+      x,
+      y,
+      width: 180,
+      height: 120,
+      text: "R:LOGO.GRF",
+      locked: false,
+      hidden: false,
+      filled: false,
+      zIndex,
+      font: "0",
+      orientation: "N"
+    };
+  }
+  if (type === "table") {
+    return {
+      id: crypto.randomUUID(),
+      type,
+      x,
+      y,
+      width: 320,
+      height: 160,
+      text: "3x2",
+      locked: false,
+      hidden: false,
       filled: false,
       zIndex,
       font: "0",
@@ -164,45 +263,45 @@ function createItem(type: BuilderElementType, x: number, y: number, zIndex: numb
     };
   }
   if (type === "code128") {
-    return { id: crypto.randomUUID(), type, x, y, width: 280, height: 120, text: "1234567890", filled: false, zIndex, font: "0", orientation: "N" };
+    return { id: crypto.randomUUID(), type, x, y, width: 280, height: 120, text: "1234567890", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
   }
   if (type === "gs1128") {
-    return { id: crypto.randomUUID(), type, x, y, width: 300, height: 120, text: "(00)012345678901234567", filled: false, zIndex, font: "0", orientation: "N" };
+    return { id: crypto.randomUUID(), type, x, y, width: 300, height: 120, text: "(00)012345678901234567", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
   }
   if (type === "itf14") {
-    return { id: crypto.randomUUID(), type, x, y, width: 280, height: 110, text: "01234567890123", filled: false, zIndex, font: "0", orientation: "N" };
+    return { id: crypto.randomUUID(), type, x, y, width: 280, height: 110, text: "01234567890123", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
   }
   if (type === "code39") {
-    return { id: crypto.randomUUID(), type, x, y, width: 280, height: 110, text: "CODE39-123", filled: false, zIndex, font: "0", orientation: "N" };
+    return { id: crypto.randomUUID(), type, x, y, width: 280, height: 110, text: "CODE39-123", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
   }
   if (type === "pdf417") {
-    return { id: crypto.randomUUID(), type, x, y, width: 280, height: 140, text: "PDF417 SAMPLE DATA", filled: false, zIndex, font: "0", orientation: "N" };
+    return { id: crypto.randomUUID(), type, x, y, width: 280, height: 140, text: "PDF417 SAMPLE DATA", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
   }
   if (type === "qr") {
-    return { id: crypto.randomUUID(), type, x, y, width: 120, height: 120, text: "https://zplremix.local", filled: false, zIndex, font: "0", orientation: "N" };
+    return { id: crypto.randomUUID(), type, x, y, width: 120, height: 120, text: "https://zplremix.local", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
   }
   if (type === "datamatrix") {
-    return { id: crypto.randomUUID(), type, x, y, width: 120, height: 120, text: "DMX-123456", filled: false, zIndex, font: "0", orientation: "N" };
+    return { id: crypto.randomUUID(), type, x, y, width: 120, height: 120, text: "DMX-123456", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
   }
   if (type === "ean13") {
-    return { id: crypto.randomUUID(), type, x, y, width: 260, height: 110, text: "5901234123457", filled: false, zIndex, font: "0", orientation: "N" };
+    return { id: crypto.randomUUID(), type, x, y, width: 260, height: 110, text: "5901234123457", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
   }
   if (type === "line") {
-    return { id: crypto.randomUUID(), type, x, y, width: 280, height: 4, text: "", filled: false, zIndex, font: "0", orientation: "N" };
+    return { id: crypto.randomUUID(), type, x, y, width: 280, height: 4, text: "", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
   }
   if (type === "line-v") {
-    return { id: crypto.randomUUID(), type, x, y, width: 4, height: 220, text: "", filled: false, zIndex, font: "0", orientation: "N" };
+    return { id: crypto.randomUUID(), type, x, y, width: 4, height: 220, text: "", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
   }
   if (type === "line-d") {
-    return { id: crypto.randomUUID(), type, x, y, width: 220, height: 120, text: "R", filled: false, zIndex, font: "0", orientation: "N" };
+    return { id: crypto.randomUUID(), type, x, y, width: 220, height: 120, text: "R", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
   }
   if (type === "circle") {
-    return { id: crypto.randomUUID(), type, x, y, width: 120, height: 120, text: "", filled: false, zIndex, font: "0", orientation: "N" };
+    return { id: crypto.randomUUID(), type, x, y, width: 120, height: 120, text: "", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
   }
   if (type === "ellipse") {
-    return { id: crypto.randomUUID(), type, x, y, width: 180, height: 120, text: "", filled: false, zIndex, font: "0", orientation: "N" };
+    return { id: crypto.randomUUID(), type, x, y, width: 180, height: 120, text: "", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
   }
-  return { id: crypto.randomUUID(), type, x, y, width: 240, height: 120, text: "", filled: false, zIndex, font: "0", orientation: "N" };
+  return { id: crypto.randomUUID(), type, x, y, width: 240, height: 120, text: "", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -309,6 +408,81 @@ function extractGraphicDownloadCommands(zpl: string): string[] {
   return Array.from(unique.values());
 }
 
+function parseTableSpec(text: string): { rows: number; cols: number } {
+  const normalized = (text ?? "").trim().toLowerCase();
+  const match = /^(\d+)\s*[x,]\s*(\d+)$/.exec(normalized);
+  const rows = clamp(Number(match?.[1] ?? 3), 1, 24);
+  const cols = clamp(Number(match?.[2] ?? 2), 1, 24);
+  return { rows, cols };
+}
+
+function normalizeGraphicNameFromFilename(filename: string): string {
+  const base = (filename ?? "LOGO")
+    .replace(/\.[^.]+$/, "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9_]/g, "_")
+    .slice(0, 32) || "LOGO";
+  return normalizeGraphicName(`R:${base}.GRF`);
+}
+
+function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("Failed to read file."));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function pngToDg(file: File, name: string): Promise<UploadedGraphic> {
+  const dataUrl = await fileToDataUrl(file);
+  const image = new Image();
+  image.src = dataUrl;
+  await image.decode();
+  const width = Math.max(1, Math.round(image.naturalWidth || image.width));
+  const height = Math.max(1, Math.round(image.naturalHeight || image.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    throw new Error("Could not open image context.");
+  }
+  ctx.drawImage(image, 0, 0, width, height);
+  const data = ctx.getImageData(0, 0, width, height).data;
+  const bytesPerRow = Math.ceil(width / 8);
+  const totalBytes = bytesPerRow * height;
+  const chunks: string[] = [];
+  for (let y = 0; y < height; y += 1) {
+    for (let byteIndex = 0; byteIndex < bytesPerRow; byteIndex += 1) {
+      let byte = 0;
+      for (let bit = 0; bit < 8; bit += 1) {
+        const x = byteIndex * 8 + bit;
+        if (x >= width) {
+          continue;
+        }
+        const offset = (y * width + x) * 4;
+        const r = data[offset];
+        const g = data[offset + 1];
+        const b = data[offset + 2];
+        const a = data[offset + 3];
+        const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+        const dark = a > 20 && luminance < 170;
+        if (dark) {
+          byte |= 1 << (7 - bit);
+        }
+      }
+      chunks.push(byte.toString(16).toUpperCase().padStart(2, "0"));
+    }
+  }
+  return {
+    name,
+    width,
+    height,
+    command: `~DG${name},${totalBytes},${bytesPerRow},${chunks.join("")}`
+  };
+}
+
 function stripCode128ControlSequences(value: string): string {
   return (value ?? "").replace(/>([:;689])/g, "");
 }
@@ -335,10 +509,13 @@ function buildItemFingerprint(item: BuilderItem): string {
   return [
     item.type,
     item.text,
+    item.textWidthRatio ?? 0.6,
     Math.round(item.width),
     Math.round(item.height),
     item.orientation,
     item.font,
+    item.locked ? "1" : "0",
+    item.hidden ? "1" : "0",
     item.filled ? "1" : "0"
   ].join("|");
 }
@@ -438,8 +615,9 @@ function snapToItemsAxis(
   draggingId: string,
   items: BuilderItem[],
   threshold: number
-): number {
+): { value: number; guide: number | null } {
   let snapped = value;
+  let guide: number | null = null;
   let bestDistance = threshold + 1;
   for (const other of items) {
     if (other.id === draggingId) {
@@ -460,21 +638,76 @@ function snapToItemsAxis(
       if (distance <= threshold && distance < bestDistance) {
         bestDistance = distance;
         snapped = candidate;
+        if (axis === "x") {
+          if (candidate === otherStart || candidate === otherEnd) {
+            guide = candidate;
+          } else if (candidate === otherStart - size) {
+            guide = otherStart;
+          } else if (candidate === otherEnd - size) {
+            guide = otherEnd;
+          } else {
+            guide = otherCenter;
+          }
+        } else {
+          if (candidate === otherStart || candidate === otherEnd) {
+            guide = candidate;
+          } else if (candidate === otherStart - size) {
+            guide = otherStart;
+          } else if (candidate === otherEnd - size) {
+            guide = otherEnd;
+          } else {
+            guide = otherCenter;
+          }
+        }
       }
     }
   }
-  return snapped;
+  return { value: snapped, guide };
+}
+
+function snapResizeEdgeToItems(
+  edge: number,
+  axis: "x" | "y",
+  resizingId: string,
+  items: BuilderItem[],
+  threshold: number
+): { edge: number; guide: number | null } {
+  let snapped = edge;
+  let guide: number | null = null;
+  let bestDistance = threshold + 1;
+  for (const other of items) {
+    if (other.id === resizingId) {
+      continue;
+    }
+    const otherStart = axis === "x" ? other.x : other.y;
+    const otherEnd = axis === "x" ? other.x + other.width : other.y + other.height;
+    const otherCenter = (otherStart + otherEnd) / 2;
+    const candidates = [otherStart, otherEnd, otherCenter];
+    for (const candidate of candidates) {
+      const distance = Math.abs(candidate - edge);
+      if (distance <= threshold && distance < bestDistance) {
+        bestDistance = distance;
+        snapped = candidate;
+        guide = candidate;
+      }
+    }
+  }
+  return { edge: snapped, guide };
 }
 
 function buildZplFromItems(
   items: BuilderItem[],
   canvasWidth: number,
   canvasHeight: number,
-  graphicDownloads: string[] = []
+  graphicDownloads: string[] = [],
+  graphicSizes: Map<string, { width: number; height: number }> = new Map()
 ): string {
-  const lines = ["^XA", `^PW${canvasWidth}`, `^LL${canvasHeight}`, "^LH0,0"];
+  const lines = ["^XA", `^PW${canvasWidth}`, `^LL${canvasHeight}`, "^LH0,0", "^CI28"];
   graphicDownloads.forEach((entry) => lines.push(entry));
   [...items].sort((a, b) => a.zIndex - b.zIndex).forEach((item) => {
+    if (item.hidden) {
+      return;
+    }
     const x = Math.round(item.x);
     const y = Math.round(item.y);
     const canReuseSource =
@@ -503,8 +736,32 @@ function buildZplFromItems(
     }
     if (item.type === "text") {
       const textHeight = Math.max(14, Math.round(item.height * 0.8));
-      const textWidth = Math.max(10, Math.round(textHeight * 0.6));
+      const textWidthRatio = clamp(item.textWidthRatio ?? 0.6, 0.2, 1.5);
+      const textWidth = Math.max(8, Math.round(textHeight * textWidthRatio));
       lines.push(`^FO${x},${y}^A${item.font}${item.orientation},${textHeight},${textWidth}^FD${item.text}^FS`);
+      return;
+    }
+    if (item.type === "graphic") {
+      const name = normalizeGraphicName(item.text || "R:LOGO.GRF");
+      const base = graphicSizes.get(name) ?? { width: Math.max(1, Math.round(item.width)), height: Math.max(1, Math.round(item.height)) };
+      const mx = clamp(Math.round(Math.max(1, item.width) / Math.max(1, base.width)), 1, 99);
+      const my = clamp(Math.round(Math.max(1, item.height) / Math.max(1, base.height)), 1, 99);
+      lines.push(`^FO${x},${y}^XG${name},${mx},${my}^FS`);
+      return;
+    }
+    if (item.type === "table") {
+      const width = Math.max(12, Math.round(item.width));
+      const height = Math.max(12, Math.round(item.height));
+      const { rows, cols } = parseTableSpec(item.text);
+      lines.push(`^FO${x},${y}^GB${width},${height},2^FS`);
+      for (let col = 1; col < cols; col += 1) {
+        const xLine = x + Math.round((width * col) / cols);
+        lines.push(`^FO${xLine},${y}^GB1,${height},1^FS`);
+      }
+      for (let row = 1; row < rows; row += 1) {
+        const yLine = y + Math.round((height * row) / rows);
+        lines.push(`^FO${x},${yLine}^GB${width},1,1^FS`);
+      }
       return;
     }
     if (item.type === "code128") {
@@ -608,6 +865,8 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
     const pushParsed = (item: BuilderItem) => {
       items.push({
         ...item,
+        locked: false,
+        hidden: false,
         sourceCommand: command,
         sourceBody: body,
         sourceAnchorX: rawX,
@@ -654,12 +913,12 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
       );
       pushParsed({
         id: crypto.randomUUID(),
-        type: "passthrough",
+        type: "graphic",
         x: position.x,
         y: position.y,
         width: position.width,
         height: position.height,
-        text: `XG ${name || "GRAPHIC"}`,
+        text: name || "R:LOGO.GRF",
         filled: false,
         zIndex: items.length,
         font: "0",
@@ -777,16 +1036,19 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
 
     if (/\^BX/i.test(body)) {
       const fd = /\^FD([^\\^]*)/i.exec(body);
-      const bx = /\^BX([NRIB])?/i.exec(body);
-      const orientation = normalizeOrientation(bx?.[1] ?? fieldOrientation);
+      const bxArgs = parseZplCommandArgs(body, "BX");
+      const orientation = normalizeOrientation(bxArgs[0] || fieldOrientation);
+      const moduleWidth = clamp(Number(bxArgs[1] ?? 5), 1, 12);
+      const payload = fd?.[1] ?? "DMX-123456";
+      const dmSize = estimateDatamatrixBoxSize(payload, moduleWidth);
       pushParsed({
         id: crypto.randomUUID(),
         type: "datamatrix",
         x: rawX,
         y: rawY,
-        width: 120,
-        height: 120,
-        text: fd?.[1] ?? "DMX-123456",
+        width: dmSize.width,
+        height: dmSize.height,
+        text: payload,
         filled: false,
         zIndex: items.length,
         font: "0",
@@ -969,8 +1231,10 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
       const font = ((a?.[1] ?? "0").toUpperCase() as ZplFont);
       const orientation = normalizeOrientation(a?.[2] ?? fieldOrientation);
       const h = Number(a?.[3] || 32);
-      const width = estimateTextBoxWidth(fd[1], h);
-      const height = Math.max(24, Math.round(h * 1.2));
+      const w = Number(a?.[4] || 0);
+      const textWidthRatio = h > 0 && w > 0 ? clamp(w / h, 0.2, 1.5) : 0.6;
+      const width = estimateTextBoxWidth(fd[1], h, w, font);
+      const height = Math.max(16, Math.round(h));
       const position = mapFieldPosition(
         command,
         rawX,
@@ -987,6 +1251,7 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
         width: position.width,
         height: position.height,
         text: fd[1],
+        textWidthRatio,
         filled: false,
         zIndex: items.length,
         font: ["0", "A", "B", "D", "E", "F", "G", "H"].includes(font) ? font : "0",
@@ -1000,6 +1265,8 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
 function isContentEditableType(type: BuilderElementType): boolean {
   return (
     type === "text" ||
+    type === "graphic" ||
+    type === "table" ||
     type === "code128" ||
     type === "gs1128" ||
     type === "itf14" ||
@@ -1050,6 +1317,35 @@ function estimateQrBoxSize(text: string, magnification: number): { width: number
     });
     const size = Math.max(24, Math.round(Math.max(temp.width, temp.height) * QR_PREVIEW_DRAW_ADJUST));
     return { width: size, height: size };
+  } catch {
+    return { width: fallback, height: fallback };
+  }
+}
+
+function estimateDatamatrixBoxSize(text: string, moduleWidth: number): { width: number; height: number } {
+  const fallback = Math.max(32, Math.round(Math.max(1, moduleWidth) * 18));
+  if (typeof document === "undefined") {
+    return { width: fallback, height: fallback };
+  }
+  try {
+    const temp = document.createElement("canvas");
+    const symbolScale = Math.max(1, Math.min(12, Math.round(Math.max(1, moduleWidth) * 0.5)));
+    bwipjs.toCanvas(temp, {
+      bcid: "datamatrix",
+      text: text || "DMX-123456",
+      scale: symbolScale,
+      includetext: false,
+      parse: true,
+      parsefnc: true,
+      paddingwidth: 0,
+      paddingheight: 0,
+      backgroundcolor: "FFFFFF",
+      barcolor: "111827"
+    });
+    return {
+      width: Math.max(24, Math.round(temp.width)),
+      height: Math.max(24, Math.round(temp.height))
+    };
   } catch {
     return { width: fallback, height: fallback };
   }
@@ -1176,7 +1472,52 @@ function getMinSizeForType(type: BuilderElementType): { width: number; height: n
   if (type === "text") {
     return { width: 22, height: 16 };
   }
+  if (type === "graphic") {
+    return { width: 8, height: 8 };
+  }
+  if (type === "table") {
+    return { width: 64, height: 48 };
+  }
   return { width: 12, height: 12 };
+}
+
+function clampSizeToZplEffect(
+  type: BuilderElementType,
+  width: number,
+  height: number
+): { width: number; height: number } {
+  if (type === "qr") {
+    return {
+      width: Math.min(width, QR_EFFECTIVE_SIZE_MAX),
+      height: Math.min(height, QR_EFFECTIVE_SIZE_MAX)
+    };
+  }
+  if (type === "datamatrix") {
+    return {
+      width: Math.min(width, DATAMATRIX_EFFECTIVE_SIZE_MAX),
+      height: Math.min(height, DATAMATRIX_EFFECTIVE_SIZE_MAX)
+    };
+  }
+  return { width, height };
+}
+
+function getItemMaxPosition(item: BuilderItem, canvasWidth: number, canvasHeight: number): { x: number; y: number } {
+  if (item.type === "text") {
+    return {
+      x: canvasWidth,
+      y: canvasHeight
+    };
+  }
+  return {
+    x: canvasWidth - Math.max(12, item.width),
+    y: canvasHeight - Math.max(12, item.height)
+  };
+}
+
+function getTextCharWidthFromItem(item: BuilderItem, height: number): number {
+  const textHeight = Math.max(10, Math.round(height * 0.8));
+  const ratio = clamp(item.textWidthRatio ?? 0.6, 0.2, 1.5);
+  return Math.max(4, Math.round(textHeight * ratio));
 }
 
 function isFillableType(type: BuilderElementType): boolean {
@@ -1223,6 +1564,9 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const [dragSnapshot, setDragSnapshot] = useState<DragSnapshot[]>([]);
   const [selectionBox, setSelectionBox] = useState<SelectionBoxState | null>(null);
+  const [guideLines, setGuideLines] = useState<BuilderGuideLine[]>([]);
+  const [uploadedGraphics, setUploadedGraphics] = useState<UploadedGraphic[]>([]);
+  const [includeSeedGraphics, setIncludeSeedGraphics] = useState<boolean>(true);
   const [accordionOpen, setAccordionOpen] = useState<Record<BuilderAccordionKey, boolean>>({
     canvas: false,
     grid: false,
@@ -1235,6 +1579,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
   });
   const [zplAccordionOpen, setZplAccordionOpen] = useState<BuilderZplAccordionKey>("generated");
   const canvasRef = useRef<HTMLDivElement>(null);
+  const graphicFileInputRef = useRef<HTMLInputElement>(null);
 
   const canvasWidth = useMemo(() => {
     const mm = unitToMm(canvasSettings.labelWidth, canvasSettings.labelUnit);
@@ -1246,7 +1591,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
   }, [canvasSettings.labelHeight, canvasSettings.labelUnit, canvasSettings.densityDpmm]);
   const viewScale = useMemo(() => {
     const maxSide = Math.max(canvasWidth, canvasHeight);
-    const autoFit = 680 / maxSide;
+    const autoFit = 920 / maxSide;
     return clamp(autoFit, 0.28, 1);
   }, [canvasWidth, canvasHeight]);
 
@@ -1256,10 +1601,34 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     }
     return items.find((item) => item.id === selectedIds[0]) ?? null;
   }, [items, selectedIds]);
-  const sourceGraphicDownloads = useMemo(() => extractGraphicDownloadCommands(seedZpl), [seedZpl]);
+  const hiddenCount = useMemo(() => items.filter((item) => item.hidden).length, [items]);
+  const sourceGraphicDownloads = useMemo(
+    () => (includeSeedGraphics ? extractGraphicDownloadCommands(seedZpl) : []),
+    [includeSeedGraphics, seedZpl]
+  );
+  const sourceGraphicSizes = useMemo(
+    () => (includeSeedGraphics ? extractDownloadedGraphicSizes(seedZpl) : new Map<string, { width: number; height: number }>()),
+    [includeSeedGraphics, seedZpl]
+  );
+  const allGraphicDownloads = useMemo(() => {
+    const unique = new Set<string>(sourceGraphicDownloads);
+    uploadedGraphics.forEach((entry) => unique.add(entry.command));
+    return Array.from(unique.values());
+  }, [sourceGraphicDownloads, uploadedGraphics]);
+  const allGraphicSizes = useMemo(() => {
+    const merged = new Map<string, { width: number; height: number }>(sourceGraphicSizes);
+    uploadedGraphics.forEach((entry) => {
+      merged.set(entry.name, { width: entry.width, height: entry.height });
+    });
+    return merged;
+  }, [sourceGraphicSizes, uploadedGraphics]);
+  const getMinSizeForItem = (item: BuilderItem): { width: number; height: number } => {
+    const baseMin = getMinSizeForType(item.type);
+    return baseMin;
+  };
   const generatedZpl = useMemo(
-    () => buildZplFromItems(items, canvasWidth, canvasHeight, sourceGraphicDownloads),
-    [items, canvasWidth, canvasHeight, sourceGraphicDownloads]
+    () => buildZplFromItems(items, canvasWidth, canvasHeight, allGraphicDownloads, allGraphicSizes),
+    [items, canvasWidth, canvasHeight, allGraphicDownloads, allGraphicSizes]
   );
   const sizeRange =
     canvasSettings.labelUnit === "in"
@@ -1296,9 +1665,11 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     nextY: number,
     currentItem: BuilderItem,
     allItems: BuilderItem[]
-  ): { x: number; y: number } => {
+  ): { x: number; y: number; guides: BuilderGuideLine[] } => {
     let x = nextX;
     let y = nextY;
+    let guideX: number | null = null;
+    let guideY: number | null = null;
     const step = safeDragStep;
     const gridSnapThreshold = Math.max(3, Math.round(safeGridSize * 0.22));
     const elementSnapThreshold = Math.max(7, Math.round(Math.min(safeGridSize, step) * 0.55));
@@ -1317,27 +1688,35 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
       }
     }
     if (snapToItemsEnabled) {
-      x = snapToItemsAxis(x, currentItem.width, "x", currentItem.id, allItems, elementSnapThreshold);
-      y = snapToItemsAxis(y, currentItem.height, "y", currentItem.id, allItems, elementSnapThreshold);
+      const snappedX = snapToItemsAxis(x, currentItem.width, "x", currentItem.id, allItems, elementSnapThreshold);
+      const snappedY = snapToItemsAxis(y, currentItem.height, "y", currentItem.id, allItems, elementSnapThreshold);
+      x = snappedX.value;
+      y = snappedY.value;
+      guideX = snappedX.guide;
+      guideY = snappedY.guide;
     }
 
-    const maxX = canvasWidth - Math.max(12, currentItem.width);
-    const maxY = canvasHeight - Math.max(12, currentItem.height);
+    const maxPos = getItemMaxPosition(currentItem, canvasWidth, canvasHeight);
+    const clampedX = clamp(x, 0, maxPos.x);
+    const clampedY = clamp(y, 0, maxPos.y);
     return {
-      x: clamp(x, 0, maxX),
-      y: clamp(y, 0, maxY)
+      x: clampedX,
+      y: clampedY,
+      guides: [
+        ...(guideX !== null ? [{ axis: "x" as const, value: guideX }] : []),
+        ...(guideY !== null ? [{ axis: "y" as const, value: guideY }] : [])
+      ]
     };
   };
 
   useEffect(() => {
     setItems((prev) =>
       prev.map((item) => {
-        const maxX = canvasWidth - Math.max(12, item.width);
-        const maxY = canvasHeight - Math.max(12, item.height);
+        const maxPos = getItemMaxPosition(item, canvasWidth, canvasHeight);
         return {
           ...item,
-          x: clamp(item.x, 0, maxX),
-          y: clamp(item.y, 0, maxY)
+          x: clamp(item.x, 0, maxPos.x),
+          y: clamp(item.y, 0, maxPos.y)
         };
       })
     );
@@ -1345,6 +1724,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
 
   useEffect(() => {
     setItems(parseItemsFromZpl(seedZpl));
+    setIncludeSeedGraphics(true);
     setSelectedIds([]);
     setSelectedId(null);
     setDraggingId(null);
@@ -1352,6 +1732,26 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     setSelectionBox(null);
     setIsDirty(false);
   }, [seedZpl]);
+
+  useEffect(() => {
+    setItems((prev) =>
+      prev.map((item) => {
+        if (item.type !== "text") {
+          return item;
+        }
+        const normalizedWidth = estimateTextBoxWidth(
+          item.text,
+          item.height,
+          getTextCharWidthFromItem(item, item.height),
+          item.font
+        );
+        if (Math.abs(normalizedWidth - item.width) < 0.5) {
+          return item;
+        }
+        return { ...item, width: normalizedWidth };
+      })
+    );
+  }, []);
 
   useEffect(() => {
     if (!selectedItem) {
@@ -1422,6 +1822,46 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     setIsDirty(true);
   };
 
+  const onGraphicUploadClick = () => {
+    graphicFileInputRef.current?.click();
+  };
+
+  const onGraphicFileSelected = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) {
+      return;
+    }
+    try {
+      const name = normalizeGraphicNameFromFilename(file.name);
+      const uploaded = await pngToDg(file, name);
+      setUploadedGraphics((prev) => {
+        const filtered = prev.filter((entry) => entry.name !== uploaded.name);
+        return [...filtered, uploaded];
+      });
+      if (selectedItem?.type === "graphic") {
+        updateSelected({
+          text: uploaded.name,
+          width: uploaded.width,
+          height: uploaded.height
+        });
+      }
+    } catch {
+      // Ignore parse failures quietly and keep current builder state.
+    }
+  };
+
+  const applyUploadedGraphicToSelected = (graphic: UploadedGraphic) => {
+    if (!selectedItem || selectedItem.type !== "graphic") {
+      return;
+    }
+    updateSelected({
+      text: graphic.name,
+      width: graphic.width,
+      height: graphic.height
+    });
+  };
+
   const onCanvasMouseDown = (e: MouseEvent<HTMLDivElement>) => {
     if (!canvasRef.current || e.target !== e.currentTarget) {
       return;
@@ -1454,7 +1894,11 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     const rect = canvasRef.current.getBoundingClientRect();
     const x = (e.clientX - rect.left) / viewScale;
     const y = (e.clientY - rect.top) / viewScale;
-    const movingIds = selectedIds.includes(item.id) && selectedIds.length > 1 ? selectedIds : [item.id];
+    const selectedMovableIds = selectedIds
+      .map((id) => items.find((entry) => entry.id === id))
+      .filter((entry): entry is BuilderItem => !!entry && !entry.locked)
+      .map((entry) => entry.id);
+    const movingIds = selectedMovableIds.includes(item.id) && selectedMovableIds.length > 1 ? selectedMovableIds : [item.id];
     if (e.altKey) {
       const sources = items.filter((entry) => movingIds.includes(entry.id));
       if (!sources.length) {
@@ -1483,6 +1927,11 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     } else {
       setSelectedId(item.id);
     }
+    if (item.locked) {
+      setDraggingId(null);
+      setDragSnapshot([]);
+      return;
+    }
     setDraggingId(item.id);
     setDragOffset({ x: x - item.x, y: y - item.y });
     setDragSnapshot(items.filter((entry) => movingIds.includes(entry.id)).map((entry) => ({ id: entry.id, x: entry.x, y: entry.y })));
@@ -1490,6 +1939,9 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
 
   const onResizeHandleMouseDown = (e: MouseEvent, item: BuilderItem, axis: "right" | "bottom" | "corner") => {
     if (!canvasRef.current) {
+      return;
+    }
+    if (item.locked) {
       return;
     }
     e.preventDefault();
@@ -1519,12 +1971,13 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
       const y = (clientY - rect.top) / viewScale;
       const deltaX = x - resizing.startMouseX;
       const deltaY = y - resizing.startMouseY;
+      let resizeGuides: BuilderGuideLine[] = [];
       setItems((prev) =>
         prev.map((item) => {
           if (item.id !== resizing.id) {
             return item;
           }
-          const minSize = getMinSizeForType(item.type);
+          const minSize = getMinSizeForItem(item);
           const useX = resizing.axis === "right" || resizing.axis === "corner";
           const useY = resizing.axis === "bottom" || resizing.axis === "corner";
           let nextWidth = useX ? resizing.startWidth + deltaX : item.width;
@@ -1539,8 +1992,36 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
           }
           if (useX) nextWidth = Math.max(minSize.width, nextWidth);
           if (useY) nextHeight = Math.max(minSize.height, nextHeight);
+          if (item.type === "text") {
+            if (useX && !useY) {
+              nextHeight = Math.max(minSize.height, estimateTextBoxHeightFromWidth(item.text, nextWidth));
+            }
+            nextWidth = estimateTextBoxWidth(item.text, nextHeight, getTextCharWidthFromItem(item, nextHeight), item.font);
+          }
+          const elementSnapThreshold = Math.max(7, Math.round(Math.min(safeGridSize, safeDragStep) * 0.55));
+          let guideX: number | null = null;
+          let guideY: number | null = null;
+          if (snapToItemsEnabled) {
+            if (useX) {
+              const snapped = snapResizeEdgeToItems(item.x + nextWidth, "x", item.id, prev, elementSnapThreshold);
+              nextWidth = Math.max(minSize.width, snapped.edge - item.x);
+              guideX = snapped.guide;
+            }
+            if (useY) {
+              const snapped = snapResizeEdgeToItems(item.y + nextHeight, "y", item.id, prev, elementSnapThreshold);
+              nextHeight = Math.max(minSize.height, snapped.edge - item.y);
+              guideY = snapped.guide;
+            }
+          }
+          const capped = clampSizeToZplEffect(item.type, nextWidth, nextHeight);
+          nextWidth = capped.width;
+          nextHeight = capped.height;
           const maxWidth = canvasWidth - item.x;
           const maxHeight = canvasHeight - item.y;
+          resizeGuides = [
+            ...(guideX !== null ? [{ axis: "x" as const, value: guideX }] : []),
+            ...(guideY !== null ? [{ axis: "y" as const, value: guideY }] : [])
+          ];
           return {
             ...item,
             width: useX ? clamp(nextWidth, minSize.width, maxWidth) : item.width,
@@ -1548,10 +2029,12 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
           };
         })
       );
+      setGuideLines(resizeGuides);
       setIsDirty(true);
       return;
     }
     if (selectionBox) {
+      setGuideLines([]);
       const rect = canvasRef.current.getBoundingClientRect();
       const x = clamp((clientX - rect.left) / viewScale, 0, canvasWidth);
       const y = clamp((clientY - rect.top) / viewScale, 0, canvasHeight);
@@ -1559,6 +2042,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
       return;
     }
     if (!draggingId) {
+      setGuideLines([]);
       return;
     }
     const rect = canvasRef.current.getBoundingClientRect();
@@ -1575,6 +2059,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
           return prev;
         }
         const anchorPos = resolveDragPosition(x - dragOffset.x, y - dragOffset.y, anchorCurrent, prev);
+        setGuideLines(anchorPos.guides);
         const deltaX = anchorPos.x - anchorStart.x;
         const deltaY = anchorPos.y - anchorStart.y;
         const idSet = new Set(dragSnapshot.map((entry) => entry.id));
@@ -1587,12 +2072,11 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
           if (!start) {
             return entry;
           }
-          const maxX = canvasWidth - Math.max(12, entry.width);
-          const maxY = canvasHeight - Math.max(12, entry.height);
+          const maxPos = getItemMaxPosition(entry, canvasWidth, canvasHeight);
           return {
             ...entry,
-            x: clamp(start.x + deltaX, 0, maxX),
-            y: clamp(start.y + deltaY, 0, maxY)
+            x: clamp(start.x + deltaX, 0, maxPos.x),
+            y: clamp(start.y + deltaY, 0, maxPos.y)
           };
         });
       });
@@ -1605,6 +2089,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
           return item;
         }
         const pos = resolveDragPosition(x - dragOffset.x, y - dragOffset.y, item, prev);
+        setGuideLines(pos.guides);
         return {
           ...item,
           x: pos.x,
@@ -1626,7 +2111,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
       const maxX = Math.max(selectionBox.startX, selectionBox.currentX);
       const maxY = Math.max(selectionBox.startY, selectionBox.currentY);
       const selected = items
-        .filter((item) => item.x < maxX && item.x + item.width > minX && item.y < maxY && item.y + item.height > minY)
+        .filter((item) => !item.hidden && item.x < maxX && item.x + item.width > minX && item.y < maxY && item.y + item.height > minY)
         .map((item) => item.id);
       setSelectedIds(selected);
       setSelectedId(selected.length === 1 ? selected[0] : null);
@@ -1635,6 +2120,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     setDraggingId(null);
     setResizing(null);
     setDragSnapshot([]);
+    setGuideLines([]);
   };
 
   const updateSelected = (patch: Partial<BuilderItem>) => {
@@ -1649,20 +2135,47 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
         const next = { ...item, ...patch };
         const normalizedWidth =
           item.type === "text" && patch.text !== undefined && patch.width === undefined
-            ? estimateTextBoxWidth(next.text, next.height)
+            ? estimateTextBoxWidth(next.text, next.height, getTextCharWidthFromItem(next, next.height), next.font)
             : next.width;
-        const minSize = getMinSizeForType(item.type);
-        const nextWidth = Math.max(minSize.width, normalizedWidth);
-        const nextHeight = Math.max(minSize.height, next.height);
+        const minSize = getMinSizeForItem(next);
+        let nextWidth = Math.max(minSize.width, normalizedWidth);
+        let nextHeight = Math.max(minSize.height, next.height);
+        if (item.type === "text") {
+          if (patch.width !== undefined && patch.height === undefined) {
+            nextHeight = Math.max(minSize.height, estimateTextBoxHeightFromWidth(next.text, nextWidth));
+          }
+          nextWidth = estimateTextBoxWidth(next.text, nextHeight, getTextCharWidthFromItem(next, nextHeight), next.font);
+        }
+        const capped = clampSizeToZplEffect(item.type, nextWidth, nextHeight);
+        nextWidth = capped.width;
+        nextHeight = capped.height;
+        const maxPos = getItemMaxPosition(item, canvasWidth, canvasHeight);
         return {
           ...next,
           width: nextWidth,
           height: nextHeight,
-          x: clamp(next.x, 0, canvasWidth - Math.max(12, nextWidth)),
-          y: clamp(next.y, 0, canvasHeight - Math.max(12, nextHeight))
+          x: clamp(next.x, 0, maxPos.x),
+          y: clamp(next.y, 0, maxPos.y)
         };
       })
     );
+    setIsDirty(true);
+  };
+
+  const patchSelectedItems = (patch: Partial<BuilderItem>) => {
+    if (!selectedIds.length) {
+      return;
+    }
+    const selectedSet = new Set(selectedIds);
+    setItems((prev) => prev.map((item) => (selectedSet.has(item.id) ? { ...item, ...patch } : item)));
+    setIsDirty(true);
+  };
+
+  const unhideAll = () => {
+    if (!hiddenCount) {
+      return;
+    }
+    setItems((prev) => prev.map((item) => (item.hidden ? { ...item, hidden: false } : item)));
     setIsDirty(true);
   };
 
@@ -1679,6 +2192,8 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
 
   const resetToNewLabel = () => {
     setItems([]);
+    setUploadedGraphics([]);
+    setIncludeSeedGraphics(false);
     setSelectedIds([]);
     setSelectedId(null);
     setDraggingId(null);
@@ -1693,6 +2208,89 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
       return;
     }
     setItems((prev) => moveSelectedLayer(prev, selectedId, mode));
+    setIsDirty(true);
+  };
+
+  const alignSelected = (mode: "left" | "hcenter" | "right" | "top" | "vcenter" | "bottom") => {
+    if (selectedIds.length < 2) {
+      return;
+    }
+    const selectedSet = new Set(selectedIds);
+    setItems((prev) => {
+      const selected = prev.filter((item) => selectedSet.has(item.id));
+      if (selected.length < 2) {
+        return prev;
+      }
+      const minX = Math.min(...selected.map((item) => item.x));
+      const minY = Math.min(...selected.map((item) => item.y));
+      const maxX = Math.max(...selected.map((item) => item.x + item.width));
+      const maxY = Math.max(...selected.map((item) => item.y + item.height));
+      const centerX = (minX + maxX) / 2;
+      const centerY = (minY + maxY) / 2;
+      return prev.map((item) => {
+        if (!selectedSet.has(item.id)) {
+          return item;
+        }
+        let x = item.x;
+        let y = item.y;
+        if (mode === "left") {
+          x = minX;
+        } else if (mode === "hcenter") {
+          x = centerX - item.width / 2;
+        } else if (mode === "right") {
+          x = maxX - item.width;
+        } else if (mode === "top") {
+          y = minY;
+        } else if (mode === "vcenter") {
+          y = centerY - item.height / 2;
+        } else if (mode === "bottom") {
+          y = maxY - item.height;
+        }
+        return {
+          ...item,
+          x: clamp(x, 0, getItemMaxPosition(item, canvasWidth, canvasHeight).x),
+          y: clamp(y, 0, getItemMaxPosition(item, canvasWidth, canvasHeight).y)
+        };
+      });
+    });
+    setIsDirty(true);
+  };
+
+  const distributeSelected = (axis: "horizontal" | "vertical") => {
+    if (selectedIds.length < 3) {
+      return;
+    }
+    const selectedSet = new Set(selectedIds);
+    setItems((prev) => {
+      const selected = prev.filter((item) => selectedSet.has(item.id));
+      if (selected.length < 3) {
+        return prev;
+      }
+      const sorted = [...selected].sort((a, b) =>
+        axis === "horizontal"
+          ? (a.x + a.width / 2) - (b.x + b.width / 2)
+          : (a.y + a.height / 2) - (b.y + b.height / 2)
+      );
+      const first = sorted[0];
+      const last = sorted[sorted.length - 1];
+      const firstCenter = axis === "horizontal" ? first.x + first.width / 2 : first.y + first.height / 2;
+      const lastCenter = axis === "horizontal" ? last.x + last.width / 2 : last.y + last.height / 2;
+      const step = (lastCenter - firstCenter) / Math.max(1, sorted.length - 1);
+      const nextPositions = new Map<string, { x: number; y: number }>();
+      sorted.forEach((item, index) => {
+        const targetCenter = firstCenter + step * index;
+        const x = axis === "horizontal" ? targetCenter - item.width / 2 : item.x;
+        const y = axis === "vertical" ? targetCenter - item.height / 2 : item.y;
+        nextPositions.set(item.id, {
+          x: clamp(x, 0, getItemMaxPosition(item, canvasWidth, canvasHeight).x),
+          y: clamp(y, 0, getItemMaxPosition(item, canvasWidth, canvasHeight).y)
+        });
+      });
+      return prev.map((item) => {
+        const next = nextPositions.get(item.id);
+        return next ? { ...item, ...next } : item;
+      });
+    });
     setIsDirty(true);
   };
 
@@ -1736,15 +2334,14 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
       const selectedSet = new Set(selectedIds);
       setItems((prev) =>
         prev.map((item) => {
-          if (!selectedSet.has(item.id)) {
+          if (!selectedSet.has(item.id) || item.locked) {
             return item;
           }
-          const maxX = canvasWidth - Math.max(12, item.width);
-          const maxY = canvasHeight - Math.max(12, item.height);
+          const maxPos = getItemMaxPosition(item, canvasWidth, canvasHeight);
           return {
             ...item,
-            x: clamp(item.x + dx, 0, maxX),
-            y: clamp(item.y + dy, 0, maxY)
+            x: clamp(item.x + dx, 0, maxPos.x),
+            y: clamp(item.y + dy, 0, maxPos.y)
           };
         })
       );
@@ -2016,6 +2613,13 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                     <span className="builder-sub-accordion-icon" aria-hidden>{accordionOpen.shapes ? "-" : "+"}</span>
                   </button>
                   <div className="builder-sub-accordion-body">
+                    <input
+                      ref={graphicFileInputRef}
+                      type="file"
+                      accept=".png,image/png"
+                      className="zip-hidden-input"
+                      onChange={onGraphicFileSelected}
+                    />
                     <button type="button" draggable onDragStart={(e) => onPaletteDragStart(e, "box")}>
                       Rectangle
                     </button>
@@ -2025,6 +2629,28 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                     <button type="button" draggable onDragStart={(e) => onPaletteDragStart(e, "ellipse")}>
                       Ellipse
                     </button>
+                    <button type="button" draggable onDragStart={(e) => onPaletteDragStart(e, "table")}>
+                      Table Block
+                    </button>
+                    <button type="button" draggable onDragStart={(e) => onPaletteDragStart(e, "graphic")}>
+                      Graphic XG
+                    </button>
+                    {!!uploadedGraphics.length && (
+                      <div className="builder-uploaded-graphics">
+                        {uploadedGraphics.map((graphic) => (
+                          <button
+                            key={graphic.name}
+                            type="button"
+                            className="download-btn"
+                            onClick={() => applyUploadedGraphicToSelected(graphic)}
+                            disabled={selectedItem?.type !== "graphic"}
+                            title={graphic.name}
+                          >
+                            Use {graphic.name}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </section>
                 <section className={`builder-sub-accordion${accordionOpen.barcodes ? " is-open" : ""}`}>
@@ -2101,9 +2727,30 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                   )}
                   {isContentEditableType(selectedItem.type) && (
                     <label>
-                      Content
+                      {selectedItem.type === "table" ? "Rows x Cols" : selectedItem.type === "graphic" ? "Graphic Name" : "Content"}
                       <input type="text" value={selectedItem.text} onChange={(e) => updateSelected({ text: e.target.value })} />
                     </label>
+                  )}
+                  {selectedItem.type === "graphic" && (
+                    <div className="builder-uploaded-graphics">
+                      <button type="button" className="download-btn" onClick={onGraphicUploadClick}>
+                        Upload PNG As ~DG
+                      </button>
+                      {!!uploadedGraphics.length && uploadedGraphics.map((graphic) => (
+                        <button
+                          key={graphic.name}
+                          type="button"
+                          className="download-btn"
+                          onClick={() => applyUploadedGraphicToSelected(graphic)}
+                          title={graphic.name}
+                        >
+                          Use {graphic.name}
+                        </button>
+                      ))}
+                      <p className="muted">
+                        Note: ^XG supports upscale only (mx/my &gt;= 1). To make logo smaller, upload a smaller source image.
+                      </p>
+                    </div>
                   )}
                   {selectedItem.type === "text" && (
                     <label>
@@ -2149,6 +2796,24 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                       </select>
                     </label>
                   )}
+                  <div className="builder-flag-tools">
+                    <label className="builder-form-checkbox">
+                      Locked
+                      <input
+                        type="checkbox"
+                        checked={!!selectedItem.locked}
+                        onChange={(e) => updateSelected({ locked: e.target.checked })}
+                      />
+                    </label>
+                    <label className="builder-form-checkbox">
+                      Hidden
+                      <input
+                        type="checkbox"
+                        checked={!!selectedItem.hidden}
+                        onChange={(e) => updateSelected({ hidden: e.target.checked })}
+                      />
+                    </label>
+                  </div>
                   <div className="builder-layer-tools">
                     <button type="button" className="download-btn" onClick={() => changeSelectedLayer("back")}>
                       Send Back
@@ -2168,9 +2833,56 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                   </button>
                 </div>
               ) : selectedIds.length > 1 ? (
-                <p className="muted">{selectedIds.length} elements selected. Drag, use arrows, or press Delete.</p>
+                <>
+                  <p className="muted">{selectedIds.length} elements selected. Drag, use arrows, or press Delete.</p>
+                  <div className="builder-align-tools">
+                    <button type="button" className="download-btn" onClick={() => patchSelectedItems({ locked: true })}>
+                      Lock Selected
+                    </button>
+                    <button type="button" className="download-btn" onClick={() => patchSelectedItems({ locked: false })}>
+                      Unlock Selected
+                    </button>
+                    <button type="button" className="download-btn" onClick={() => patchSelectedItems({ hidden: true })}>
+                      Hide Selected
+                    </button>
+                    <button type="button" className="download-btn" onClick={() => patchSelectedItems({ hidden: false })}>
+                      Unhide Selected
+                    </button>
+                  </div>
+                  <div className="builder-align-tools">
+                    <button type="button" className="download-btn" onClick={() => alignSelected("left")}>
+                      Align Left
+                    </button>
+                    <button type="button" className="download-btn" onClick={() => alignSelected("hcenter")}>
+                      Align Center
+                    </button>
+                    <button type="button" className="download-btn" onClick={() => alignSelected("right")}>
+                      Align Right
+                    </button>
+                    <button type="button" className="download-btn" onClick={() => alignSelected("top")}>
+                      Align Top
+                    </button>
+                    <button type="button" className="download-btn" onClick={() => alignSelected("vcenter")}>
+                      Align Middle
+                    </button>
+                    <button type="button" className="download-btn" onClick={() => alignSelected("bottom")}>
+                      Align Bottom
+                    </button>
+                    <button type="button" className="download-btn" onClick={() => distributeSelected("horizontal")}>
+                      Distribute H
+                    </button>
+                    <button type="button" className="download-btn" onClick={() => distributeSelected("vertical")}>
+                      Distribute V
+                    </button>
+                  </div>
+                </>
               ) : (
                 <p className="muted">Click an element on canvas to edit.</p>
+              )}
+              {hiddenCount > 0 && (
+                <button type="button" className="download-btn" onClick={unhideAll}>
+                  Unhide All ({hiddenCount})
+                </button>
               )}
             </div>
           </section>
@@ -2207,10 +2919,21 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                 }}
               />
             )}
-            {[...items].sort((a, b) => a.zIndex - b.zIndex).map((item) => (
+            {guideLines.map((guide, index) => (
+              <div
+                key={`${guide.axis}-${guide.value}-${index}`}
+                className={`builder-guide-line builder-guide-line-${guide.axis}`}
+                style={
+                  guide.axis === "x"
+                    ? { left: `${guide.value * viewScale}px` }
+                    : { top: `${guide.value * viewScale}px` }
+                }
+              />
+            ))}
+            {[...items].filter((item) => !item.hidden).sort((a, b) => a.zIndex - b.zIndex).map((item) => (
               <div
                 key={item.id}
-                className={`builder-item builder-item-${item.type}${selectedIds.includes(item.id) ? " is-selected" : ""}${item.filled ? " is-filled" : ""}`}
+                className={`builder-item builder-item-${item.type}${selectedIds.includes(item.id) ? " is-selected" : ""}${item.filled ? " is-filled" : ""}${item.locked ? " is-locked" : ""}`}
                 style={{
                   left: `${item.x * viewScale}px`,
                   top: `${item.y * viewScale}px`,
@@ -2224,6 +2947,15 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                             ? "linear-gradient(135deg, transparent calc(50% - 1px), #1f2c3f calc(50% - 1px), #1f2c3f calc(50% + 1px), transparent calc(50% + 1px))"
                             : "linear-gradient(45deg, transparent calc(50% - 1px), #1f2c3f calc(50% - 1px), #1f2c3f calc(50% + 1px), transparent calc(50% + 1px))"
                       }
+                    : item.type === "table"
+                      ? (() => {
+                          const { rows, cols } = parseTableSpec(item.text);
+                          return {
+                            backgroundImage:
+                              `repeating-linear-gradient(90deg, transparent 0, transparent calc(${100 / cols}% - 1px), rgba(31,44,63,0.35) calc(${100 / cols}% - 1px), rgba(31,44,63,0.35) calc(${100 / cols}%)), ` +
+                              `repeating-linear-gradient(0deg, transparent 0, transparent calc(${100 / rows}% - 1px), rgba(31,44,63,0.35) calc(${100 / rows}% - 1px), rgba(31,44,63,0.35) calc(${100 / rows}%))`
+                          };
+                        })()
                     : {})
                 }}
                 onMouseDown={(e) => onItemMouseDown(e, item)}
@@ -2232,26 +2964,27 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                   <span
                     style={
                       (() => {
-                        const isQuarterTurn = item.orientation === "R" || item.orientation === "B";
-                        const textLength = Math.max(1, item.text.length);
-                        const logicalWidth = isQuarterTurn ? item.height : item.width;
-                        const logicalHeight = isQuarterTurn ? item.width : item.height;
-                        const fitByHeight = logicalHeight * 0.82;
-                        const fitByWidth = logicalWidth / (textLength * 0.62);
-                        const fitted = Math.max(10, Math.min(fitByHeight, fitByWidth));
-                        return {
-                        fontSize: `${Math.max(10, Math.round(fitted * viewScale))}px`,
-                        lineHeight: 1,
-                        fontWeight: 700,
-                        transform:
+                        const textPx = Math.max(10, Math.round(item.height * 0.8));
+                        const widthCalibration = resolveBuilderTextWidthCalibration(item.font);
+                        const textWidthRatio = clamp(item.textWidthRatio ?? 0.6, 0.2, 1.5);
+                        const rotation =
                           item.orientation === "R"
                             ? "rotate(90deg)"
                             : item.orientation === "I"
                               ? "rotate(180deg)"
                               : item.orientation === "B"
                                 ? "rotate(270deg)"
-                                : undefined,
-                        transformOrigin: "50% 50%"
+                                : "";
+                        const hasRotation = rotation.length > 0;
+                        const widthScale = widthCalibration * textWidthRatio;
+                        const scalePart = widthScale !== 1 ? ` scaleX(${widthScale})` : "";
+                        return {
+                        fontSize: `${Math.max(10, Math.round(textPx * viewScale))}px`,
+                        fontFamily: resolveBuilderTextFontFamily(item.font),
+                        lineHeight: 1,
+                        fontWeight: 700,
+                        transform: `${rotation}${scalePart}`.trim() || undefined,
+                        transformOrigin: hasRotation ? "50% 50%" : "0 0"
                         };
                       })()
                     }
@@ -2262,10 +2995,16 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                 {item.type === "passthrough" && (
                   <span className="builder-item-passthrough-label">{item.text || "PASSTHROUGH"}</span>
                 )}
+                {item.type === "graphic" && (
+                  <span className="builder-item-passthrough-label">{item.text || "R:LOGO.GRF"}</span>
+                )}
+                {item.type === "table" && (
+                  <span className="builder-item-passthrough-label">TABLE {parseTableSpec(item.text).rows}x{parseTableSpec(item.text).cols}</span>
+                )}
                 {isBarcodeElementType(item.type) && <BuilderBarcodePreview item={item} />}
-                <span className="builder-item-resize-handle builder-item-resize-handle-right" onMouseDown={(e) => onResizeHandleMouseDown(e, item, "right")} />
-                <span className="builder-item-resize-handle builder-item-resize-handle-bottom" onMouseDown={(e) => onResizeHandleMouseDown(e, item, "bottom")} />
-                <span className="builder-item-resize-handle builder-item-resize-handle-corner" onMouseDown={(e) => onResizeHandleMouseDown(e, item, "corner")} />
+                {!item.locked && <span className="builder-item-resize-handle builder-item-resize-handle-right" onMouseDown={(e) => onResizeHandleMouseDown(e, item, "right")} />}
+                {!item.locked && <span className="builder-item-resize-handle builder-item-resize-handle-bottom" onMouseDown={(e) => onResizeHandleMouseDown(e, item, "bottom")} />}
+                {!item.locked && <span className="builder-item-resize-handle builder-item-resize-handle-corner" onMouseDown={(e) => onResizeHandleMouseDown(e, item, "corner")} />}
               </div>
             ))}
           </div>

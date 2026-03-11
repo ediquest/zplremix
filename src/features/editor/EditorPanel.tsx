@@ -114,6 +114,7 @@ export function EditorPanel({ rawInput, onInputChange }: EditorPanelProps) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const highlightRef = useRef<HTMLPreElement>(null);
   const [wrapEnabled, setWrapEnabled] = useState(false);
+  const [copied, setCopied] = useState(false);
   const highlighted = useMemo(() => renderHighlightedZpl(rawInput), [rawInput]);
 
   const syncScroll = () => {
@@ -128,11 +129,33 @@ export function EditorPanel({ rawInput, onInputChange }: EditorPanelProps) {
     onInputChange(beautifyZpl(rawInput));
   };
 
+  const handleCopy = async () => {
+    if (!rawInput) {
+      return;
+    }
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(rawInput);
+      } else if (inputRef.current) {
+        inputRef.current.focus();
+        inputRef.current.select();
+        document.execCommand("copy");
+      }
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      setCopied(false);
+    }
+  };
+
   return (
     <section className="panel">
       <div className="panel-header editor-panel-header">
         <h2>ZPL Input</h2>
         <div className="editor-actions">
+          <button type="button" className={`editor-action-btn${copied ? " is-active" : ""}`} onClick={handleCopy}>
+            {copied ? "Copied" : "Copy"}
+          </button>
           <button
             type="button"
             className={`editor-action-btn${wrapEnabled ? " is-active" : ""}`}

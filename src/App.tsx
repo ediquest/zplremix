@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { detectAndDecode } from "./core/encoding/detectAndDecode";
 import type { LabelCandidate } from "./core/types";
 import { extractLabels } from "./core/zpl/extractLabels";
 import { LabelBuilderPage } from "./features/builder/LabelBuilderPage";
 import { ZplCodecPage } from "./features/codec/ZplBase64Page";
 import { EditorPanel } from "./features/editor/EditorPanel";
+import { ZplExamplesPanel } from "./features/examples/ZplExamplesPanel";
+import { GraphicToZplPage, type GraphicToZplStoredState } from "./features/graphics/GraphicToZplPage";
 import { LabelTilesPanel } from "./features/import/LabelTilesPanel";
 import { ZipUpload } from "./features/import/ZipUpload";
 import { PreviewPanel } from "./features/preview/PreviewPanel";
@@ -55,12 +57,12 @@ const SAMPLE_ZPL = `^XA
 ^FO70,945^A0N,28,28^FD00359012345678901234^FS
 ^FO40,1030^GB400,150,3^FS
 ^FO55,1045^A0N,24,24^FDGTIN^FS
-^FO72,1081^BY2,2,48^BCN,48,Y,N,N^FD059012345678^FS
+^FO108,1081^BY1,2,48^BCN,48,Y,N,N^FD059012345678^FS
 ^FO55,1145^A0N,24,24^FDQTY:^FS
 ^FO120,1142^A0N,32,32^FD24^FS
 ^FO460,1030^GB312,150,3^FS
 ^FO475,1045^A0N,24,24^FDQR DATA^FS
-^FO545,995^BQN,2,3
+^FO580,1060^BQN,2,3
 ^FDLA,{"order":"ORD-00014521","sscc":"00359012345678901234","gtin":"05901234567890","qty":24}^FS
 ^XZ`;
 
@@ -74,7 +76,7 @@ function pickBestInitialLabel(labels: LabelCandidate[]): LabelCandidate | null {
 }
 
 export default function App() {
-  const [viewMode, setViewMode] = useState<"preview" | "builder" | "codec">("preview");
+  const [viewMode, setViewMode] = useState<"preview" | "builder" | "graphics" | "codec">("preview");
   const [theme, setTheme] = useState<ThemeMode>(() => {
     try {
       const stored = window.localStorage.getItem(LS_THEME_KEY);
@@ -87,6 +89,7 @@ export default function App() {
     return "light";
   });
   const [builderSeedZpl, setBuilderSeedZpl] = useState<string>(SAMPLE_ZPL);
+  const [graphicsState, setGraphicsState] = useState<GraphicToZplStoredState | null>(null);
   const [persistCurrentZpl, setPersistCurrentZpl] = useState<boolean>(() => {
     try {
       return window.localStorage.getItem(LS_PERSIST_KEY) === "1";
@@ -109,6 +112,8 @@ export default function App() {
   const [zipLabels, setZipLabels] = useState<LabelCandidate[]>([]);
   const [selectedLabelId, setSelectedLabelId] = useState<string | null>(null);
   const [selectedLabelZplKey, setSelectedLabelZplKey] = useState<string>("");
+  const [showDuplicateLabels, setShowDuplicateLabels] = useState<boolean>(false);
+  const previewSectionRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedInput(rawInput), DEBOUNCE_MS);
@@ -143,70 +148,84 @@ export default function App() {
     () => extractLabels(decoded.text, "editor"),
     [decoded.text]
   );
-  const availableLabels = useMemo(
+  const activeLabels = zipLabels.length ? zipLabels : labels;
+  const uniqueActiveLabels = useMemo(
     () => {
       const byContent = new Map<string, LabelCandidate>();
-      const push = (item: LabelCandidate) => {
+      activeLabels.forEach((item) => {
         const key = item.zpl.trim();
-        if (!key) {
+        if (!key || byContent.has(key)) {
           return;
         }
-        const existing = byContent.get(key);
-        if (!existing) {
-          byContent.set(key, item);
-          return;
-        }
-        if (existing.source === "editor" && item.source !== "editor") {
-          byContent.set(key, item);
-        }
-      };
-      labels.forEach(push);
-      zipLabels.forEach(push);
+        byContent.set(key, item);
+      });
       return Array.from(byContent.values());
     },
-    [labels, zipLabels]
+    [activeLabels]
   );
+  const visibleLabels = showDuplicateLabels ? activeLabels : uniqueActiveLabels;
   const selectedLabel = useMemo(
-    () => availableLabels.find((item) => item.id === selectedLabelId) ?? availableLabels[0] ?? null,
-    [availableLabels, selectedLabelId]
+    () => visibleLabels.find((item) => item.id === selectedLabelId) ?? visibleLabels[0] ?? null,
+    [visibleLabels, selectedLabelId]
   );
   const pageDescription =
     viewMode === "preview"
       ? "Paste ZPL, import files, and preview labels instantly."
       : viewMode === "builder"
         ? "Build, move, and adjust label elements visually."
+        : viewMode === "graphics"
+          ? "Convert PNG logos to ZPL graphic commands with instant preview."
         : "Encode and decode ZPL payloads across common transport formats.";
 
   useEffect(() => {
-    if (!availableLabels.length) {
+    if (!visibleLabels.length) {
       setSelectedLabelId(null);
       setSelectedLabelZplKey("");
       return;
     }
-    if (selectedLabelId && availableLabels.some((item) => item.id === selectedLabelId)) {
+    if (selectedLabelId && visibleLabels.some((item) => item.id === selectedLabelId)) {
       return;
     }
     if (selectedLabelZplKey) {
-      const byContent = availableLabels.find((item) => item.zpl.trim() === selectedLabelZplKey);
+      const byContent = visibleLabels.find((item) => item.zpl.trim() === selectedLabelZplKey);
       if (byContent) {
         setSelectedLabelId(byContent.id);
         return;
       }
     }
     {
-      const initial = pickBestInitialLabel(availableLabels);
-      const picked = initial ?? availableLabels[0];
+      const initial = pickBestInitialLabel(visibleLabels);
+      const picked = initial ?? visibleLabels[0];
       setSelectedLabelId(picked.id);
       setSelectedLabelZplKey(picked.zpl.trim());
     }
-  }, [availableLabels, selectedLabelId, selectedLabelZplKey]);
+  }, [visibleLabels, selectedLabelId, selectedLabelZplKey]);
 
   const onSelectLabel = (id: string) => {
     setSelectedLabelId(id);
-    const picked = availableLabels.find((label) => label.id === id);
+    const picked = visibleLabels.find((label) => label.id === id);
     if (picked) {
       setSelectedLabelZplKey(picked.zpl.trim());
     }
+    window.requestAnimationFrame(() => {
+      previewSectionRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start"
+      });
+    });
+  };
+
+  const onSelectLabelByIndex = (index: number) => {
+    if (!visibleLabels.length) {
+      return;
+    }
+    const safeIndex = Math.max(1, Math.min(visibleLabels.length, Math.round(index)));
+    const picked = visibleLabels[safeIndex - 1];
+    if (!picked) {
+      return;
+    }
+    setSelectedLabelId(picked.id);
+    setSelectedLabelZplKey(picked.zpl.trim());
   };
 
   const onZipLabelsDetected = (detected: LabelCandidate[]) => {
@@ -217,6 +236,13 @@ export default function App() {
       setSelectedLabelZplKey(initial.zpl.trim());
       setRawInput(initial.zpl);
     }
+  };
+
+  const onReplaceSelectedZpl = (nextZpl: string) => {
+    setRawInput(nextZpl);
+    setZipLabels([]);
+    setSelectedLabelId(null);
+    setSelectedLabelZplKey(nextZpl.trim());
   };
 
   const openBuilder = (zpl?: string) => {
@@ -256,6 +282,13 @@ export default function App() {
             </button>
             <button
               type="button"
+              className={`app-nav-btn${viewMode === "graphics" ? " is-active" : ""}`}
+              onClick={() => setViewMode("graphics")}
+            >
+              Graphic To ZPL
+            </button>
+            <button
+              type="button"
               className={`app-nav-btn${viewMode === "codec" ? " is-active" : ""}`}
               onClick={() => setViewMode("codec")}
             >
@@ -284,17 +317,23 @@ export default function App() {
             <EditorPanel rawInput={rawInput} onInputChange={setRawInput} />
             <ZipUpload onLabelsDetected={onZipLabelsDetected} />
             <LabelTilesPanel
-              labels={availableLabels}
+              labels={visibleLabels}
               selectedLabelId={selectedLabelId}
               onSelectLabel={onSelectLabel}
+              showDuplicates={showDuplicateLabels}
+              onShowDuplicatesChange={setShowDuplicateLabels}
             />
+            <ZplExamplesPanel onLoadExample={setRawInput} />
           </div>
           <PreviewPanel
             mode={decoded.mode}
             theme={theme}
-            labels={availableLabels}
+            labels={visibleLabels}
             selectedLabelId={selectedLabelId}
+            sectionRef={previewSectionRef}
+            onSelectLabelByIndex={onSelectLabelByIndex}
             onOpenBuilder={openBuilder}
+            onReplaceSelectedZpl={onReplaceSelectedZpl}
             persistCurrentZpl={persistCurrentZpl}
             onPersistCurrentZplChange={setPersistCurrentZpl}
           />
@@ -302,6 +341,13 @@ export default function App() {
       )}
       {viewMode === "builder" && (
         <LabelBuilderPage seedZpl={builderSeedZpl} onBack={closeBuilder} />
+      )}
+      {viewMode === "graphics" && (
+        <GraphicToZplPage
+          onOpenBuilder={openBuilder}
+          initialState={graphicsState}
+          onStateChange={setGraphicsState}
+        />
       )}
       {viewMode === "codec" && <ZplCodecPage />}
       <footer className="app-footer">© 2026 Adrian Sarczyński</footer>
