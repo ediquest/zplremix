@@ -2267,7 +2267,7 @@ function renderEan13Barcode(
 }
 
 function detectBarcodeLeftEdge(canvas: HTMLCanvasElement): number {
-  const ctx = canvas.getContext("2d");
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
   if (!ctx || canvas.width <= 0 || canvas.height <= 0) {
     return 0;
   }
@@ -2749,7 +2749,7 @@ function createGraphicCanvas(
   const graphicCanvas = document.createElement("canvas");
   graphicCanvas.width = width;
   graphicCanvas.height = height;
-  const graphicCtx = graphicCanvas.getContext("2d");
+  const graphicCtx = graphicCanvas.getContext("2d", { willReadFrequently: true });
   if (!graphicCtx) {
     return graphicCanvas;
   }
@@ -2824,7 +2824,7 @@ function drawZplPreview(
   },
   qrLegacyOffset = false
 ): DrawResult {
-  const ctx = canvas.getContext("2d");
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
   if (!ctx) {
     return {
       code128Debug: null,
