@@ -38,6 +38,7 @@ const SUPPORTED_MIME_PREFIXES = [
   "image/bmp",
   "image/gif"
 ];
+const SCALE_STEP_RATIO = 0.1;
 
 function isSupportedRasterFile(file: File): boolean {
   const lowerName = (file.name || "").toLowerCase();
@@ -261,6 +262,16 @@ export function GraphicToZplPage({ onOpenBuilder, onOpenPreview, onSaveZpl, init
     () => items.find((entry) => entry.id === selectedId) ?? null,
     [items, selectedId]
   );
+  const selectedScaleText = useMemo(() => {
+    if (!selectedItem) {
+      return "1.00 x 1.00";
+    }
+    const effectiveWidth = Math.max(1, selectedItem.current.width * selectedItem.mx);
+    const effectiveHeight = Math.max(1, selectedItem.current.height * selectedItem.my);
+    const sx = effectiveWidth / Math.max(1, selectedItem.original.width);
+    const sy = effectiveHeight / Math.max(1, selectedItem.original.height);
+    return `${sx.toFixed(2)} x ${sy.toFixed(2)}`;
+  }, [selectedItem]);
 
   const clampPlacement = (nextX: number, nextY: number, width: number, height: number) => {
     const maxX = Math.max(0, labelWidth - width);
@@ -372,67 +383,54 @@ ${drawLines.join("\n")}
     setError("");
   };
 
-  const adjustScale = async (delta: number) => {
+  const adjustScale = async (delta: number, axis: "both" | "x" | "y" = "both") => {
     if (!selectedItem || isConverting) {
       return;
     }
-    if (delta < 0 && selectedItem.mx <= 1 && selectedItem.my <= 1) {
-      try {
-        setIsConverting(true);
-        const targetWidth = Math.max(1, Math.floor(selectedItem.current.width * 0.85));
-        const targetHeight = Math.max(1, Math.floor(selectedItem.current.height * 0.85));
-        if (targetWidth === selectedItem.current.width && targetHeight === selectedItem.current.height) {
-          return;
-        }
-        const downscaled = await dataUrlToDg(
-          selectedItem.sourceDataUrl,
-          selectedItem.current.name,
-          targetWidth,
-          targetHeight
-        );
-        setItems((prev) =>
-          prev.map((item) => {
-            if (item.id !== selectedItem.id) {
-              return item;
-            }
-            const clamped = clampPlacement(item.x, item.y, downscaled.width, downscaled.height);
-            return {
-              ...item,
-              current: downscaled,
-              x: clamped.x,
-              y: clamped.y,
-              mx: 1,
-              my: 1
-            };
-          })
-        );
-        return;
-      } catch {
-        setError("Could not downscale graphic. Try a smaller source image.");
-        return;
-      } finally {
-        setIsConverting(false);
+    try {
+      setIsConverting(true);
+      const factor = delta > 0 ? 1 + SCALE_STEP_RATIO : 1 - SCALE_STEP_RATIO;
+      const baseWidth = Math.max(1, Math.round(selectedItem.current.width * selectedItem.mx));
+      const baseHeight = Math.max(1, Math.round(selectedItem.current.height * selectedItem.my));
+      let targetWidth = baseWidth;
+      let targetHeight = baseHeight;
+      if (axis === "both" || axis === "x") {
+        targetWidth = Math.max(1, Math.round(baseWidth * factor));
       }
+      if (axis === "both" || axis === "y") {
+        targetHeight = Math.max(1, Math.round(baseHeight * factor));
+      }
+      if (targetWidth === baseWidth && targetHeight === baseHeight) {
+        return;
+      }
+      const resized = await dataUrlToDg(
+        selectedItem.sourceDataUrl,
+        selectedItem.current.name,
+        targetWidth,
+        targetHeight
+      );
+      setItems((prev) =>
+        prev.map((item) => {
+          if (item.id !== selectedItem.id) {
+            return item;
+          }
+          const clamped = clampPlacement(item.x, item.y, resized.width, resized.height);
+          return {
+            ...item,
+            current: resized,
+            x: clamped.x,
+            y: clamped.y,
+            mx: 1,
+            my: 1
+          };
+        })
+      );
+      setError("");
+    } catch {
+      setError("Could not resize graphic. Try again.");
+    } finally {
+      setIsConverting(false);
     }
-    setItems((prev) =>
-      prev.map((item) => {
-        if (item.id !== selectedItem.id) {
-          return item;
-        }
-        const nextMx = Math.max(1, Math.min(20, item.mx + delta));
-        const nextMy = lockScale ? nextMx : Math.max(1, Math.min(20, item.my + delta));
-        const nextWidth = Math.max(1, item.current.width * nextMx);
-        const nextHeight = Math.max(1, item.current.height * nextMy);
-        const clamped = clampPlacement(item.x, item.y, nextWidth, nextHeight);
-        return {
-          ...item,
-          mx: nextMx,
-          my: nextMy,
-          x: clamped.x,
-          y: clamped.y
-        };
-      })
-    );
   };
 
   const onGraphicMouseDown = (event: ReactMouseEvent<HTMLDivElement>, itemId: string) => {
@@ -561,17 +559,36 @@ ${drawLines.join("\n")}
         {!!selectedItem && (
           <div className="gfx-controls">
             <div className="gfx-size-buttons">
-              <button type="button" className="editor-action-btn" onClick={() => { void adjustScale(-1); }} disabled={isConverting}>
-                -
-              </button>
-              <button type="button" className="editor-action-btn" onClick={() => { void adjustScale(1); }} disabled={isConverting}>
-                +
-              </button>
+              {lockScale ? (
+                <>
+                  <button type="button" className="editor-action-btn" onClick={() => { void adjustScale(-1, "both"); }} disabled={isConverting}>
+                    -
+                  </button>
+                  <button type="button" className="editor-action-btn" onClick={() => { void adjustScale(1, "both"); }} disabled={isConverting}>
+                    +
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button type="button" className="editor-action-btn" onClick={() => { void adjustScale(-1, "x"); }} disabled={isConverting}>
+                    X-
+                  </button>
+                  <button type="button" className="editor-action-btn" onClick={() => { void adjustScale(1, "x"); }} disabled={isConverting}>
+                    X+
+                  </button>
+                  <button type="button" className="editor-action-btn" onClick={() => { void adjustScale(-1, "y"); }} disabled={isConverting}>
+                    Y-
+                  </button>
+                  <button type="button" className="editor-action-btn" onClick={() => { void adjustScale(1, "y"); }} disabled={isConverting}>
+                    Y+
+                  </button>
+                </>
+              )}
               <button type="button" className="editor-action-btn" onClick={resetSelectedToOriginal} disabled={isConverting}>
                 Reset
               </button>
               <span className="muted">
-                Scale: {selectedItem.mx} x {selectedItem.my}{isConverting ? " (converting...)" : ""}
+                Scale: {selectedScaleText}{isConverting ? " (converting...)" : ""}
               </span>
             </div>
             <label className="gfx-control gfx-control-inline">
@@ -590,8 +607,8 @@ ${drawLines.join("\n")}
                 }}
               />
             </label>
-            <p className="muted">Click item on canvas, drag to move. Resize with "-" and "+".</p>
-            <p className="muted">At scale 1, "-" creates smaller ~DG automatically.</p>
+            <p className="muted">Click item on canvas, drag to move. Resize with controls above.</p>
+            <p className="muted">Scale step: {(SCALE_STEP_RATIO * 100).toFixed(0)}% per click.</p>
           </div>
         )}
         <div className="gfx-preview-wrap">
@@ -599,7 +616,6 @@ ${drawLines.join("\n")}
             <div
               className="gfx-editor-canvas"
               style={{ width: `${scaledLabelWidth}px`, height: `${scaledLabelHeight}px` }}
-              onMouseDown={() => setSelectedId(null)}
             >
               {items.map((item) => {
                 const placedWidth = Math.max(1, item.current.width * item.mx);

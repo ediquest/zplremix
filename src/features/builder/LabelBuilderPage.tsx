@@ -28,10 +28,11 @@ type BuilderElementType =
   | "ellipse";
 type BarcodeElementType = "code128" | "gs1128" | "itf14" | "code39" | "pdf417" | "qr" | "datamatrix" | "ean13";
 type DragMode = "smooth" | "step";
-type BuilderAccordionKey = "canvas" | "grid" | "elements" | "selected" | "barcodes" | "text" | "separators" | "shapes";
+type BuilderAccordionKey = "canvas" | "grid" | "elements" | "selected" | "barcodes" | "text" | "separators" | "shapes" | "generator";
 type BuilderZplAccordionKey = "generated" | "loaded";
 type ZplOrientation = "N" | "R" | "I" | "B";
 type ZplFont = "0" | "A" | "B" | "D" | "E" | "F" | "G" | "H";
+type BatchMode = "increment" | "decrement";
 
 type BuilderItem = {
   id: string;
@@ -101,7 +102,53 @@ type UploadedGraphic = {
   height: number;
 };
 
+type BatchGeneratorRule = {
+  itemId: string;
+  mode: BatchMode;
+  start: number;
+  step: number;
+  pad: number;
+  prefix: string;
+  suffix: string;
+};
+
+type StoredBatchBuilderProject = {
+  id: string;
+  savedAt: string;
+  canvasSettings: BuilderCanvasSettings;
+  items: BuilderItem[];
+  selectedBarcodeType: BarcodeElementType;
+  gridSize: number;
+  gridDarkness: number;
+  dragMode: DragMode;
+  dragStep: number;
+  snapToGridEnabled: boolean;
+  snapToItemsEnabled: boolean;
+  uploadedGraphics: UploadedGraphic[];
+  includeSeedGraphics: boolean;
+  batchRules: BatchGeneratorRule[];
+  batchLabelCount: number;
+};
+
+type InitialBuilderState = {
+  canvasSettings: BuilderCanvasSettings;
+  items: BuilderItem[];
+  selectedBarcodeType: BarcodeElementType;
+  gridSize: number;
+  gridDarkness: number;
+  dragMode: DragMode;
+  dragStep: number;
+  snapToGridEnabled: boolean;
+  snapToItemsEnabled: boolean;
+  uploadedGraphics: UploadedGraphic[];
+  includeSeedGraphics: boolean;
+  batchRules: BatchGeneratorRule[];
+  batchLabelCount: number;
+};
+
 const LS_PREVIEW_SETTINGS_KEY = "zplremix.preview.settings";
+const LS_BUILDER_BATCH_PROJECTS_KEY = "zplremix.builder.batch.projects";
+const LS_BUILDER_LAST_BATCH_ID_KEY = "zplremix.builder.batch.last_id";
 const QR_COMPAT_OFFSET_X = 0;
 const QR_COMPAT_OFFSET_Y = 12;
 const QR_PREVIEW_DRAW_ADJUST = 0.4;
@@ -109,6 +156,7 @@ const QR_EFFECTIVE_SIZE_MAX = 293;
 const DATAMATRIX_EFFECTIVE_SIZE_MAX = 299;
 const TABLE_META_PREFIX = "ZPLRMX_TABLE";
 const SHADE_META_PREFIX = "ZPLRMX_SHADE";
+const BATCH_META_PREFIX = "ZPLRMX_BATCH";
 const TABLE_LAYOUT_TEMPLATES = ["2x2", "3x2", "3x3", "4x2", "4x3", "4x4", "6x3", "6x4"] as const;
 const DEFAULT_CANVAS_SETTINGS: BuilderCanvasSettings = {
   densityDpmm: 8,
@@ -149,6 +197,159 @@ function loadCanvasSettings(): BuilderCanvasSettings {
   } catch {
     return DEFAULT_CANVAS_SETTINGS;
   }
+}
+
+function extractBatchProjectIdFromZpl(zpl: string): string | null {
+  const normalized = (zpl ?? "")
+    .replace(/\u000F/g, "^FS\n")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E\u0010-\u001F\u007F]/g, "");
+  const re = new RegExp(`\\^FX${BATCH_META_PREFIX},([A-Za-z0-9_-]{6,64})`, "ig");
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(normalized)) !== null) {
+    if (match[1]) {
+      return match[1];
+    }
+  }
+  return null;
+}
+
+function buildBatchMarkerLine(batchId: string, index: number, total: number): string {
+  return `^FX${BATCH_META_PREFIX},${batchId},${index + 1},${total}`;
+}
+
+function injectBatchMarker(zpl: string, batchId: string, index: number, total: number): string {
+  const marker = buildBatchMarkerLine(batchId, index, total);
+  const safe = (zpl ?? "").trim();
+  if (!safe) {
+    return `^XA\n${marker}\n^XZ`;
+  }
+  if (/^\^XA\b/i.test(safe)) {
+    return safe.replace(/^\^XA\b/i, `^XA\n${marker}`);
+  }
+  return `^XA\n${marker}\n${safe}\n^XZ`;
+}
+
+function loadStoredBatchProjects(): Record<string, StoredBatchBuilderProject> {
+  try {
+    const raw = window.localStorage.getItem(LS_BUILDER_BATCH_PROJECTS_KEY);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw) as Record<string, StoredBatchBuilderProject>;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveStoredBatchProject(project: StoredBatchBuilderProject) {
+  try {
+    const existing = loadStoredBatchProjects();
+    const merged: Record<string, StoredBatchBuilderProject> = {
+      ...existing,
+      [project.id]: project
+    };
+    const sorted = Object.values(merged).sort(
+      (a, b) => new Date(b.savedAt).getTime() - new Date(a.savedAt).getTime()
+    );
+    const limited = sorted.slice(0, 20);
+    const compact = Object.fromEntries(limited.map((entry) => [entry.id, entry]));
+    window.localStorage.setItem(LS_BUILDER_BATCH_PROJECTS_KEY, JSON.stringify(compact));
+    window.localStorage.setItem(LS_BUILDER_LAST_BATCH_ID_KEY, project.id);
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+function loadLastBatchProjectId(): string | null {
+  try {
+    const raw = window.localStorage.getItem(LS_BUILDER_LAST_BATCH_ID_KEY);
+    return raw && raw.trim() ? raw.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+function deleteStoredBatchProject(projectId: string | null) {
+  if (!projectId) {
+    return;
+  }
+  try {
+    const existing = loadStoredBatchProjects();
+    if (existing[projectId]) {
+      delete existing[projectId];
+      window.localStorage.setItem(LS_BUILDER_BATCH_PROJECTS_KEY, JSON.stringify(existing));
+    }
+    const last = loadLastBatchProjectId();
+    if (last === projectId) {
+      window.localStorage.removeItem(LS_BUILDER_LAST_BATCH_ID_KEY);
+    }
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+function extractFirstLabelFromPayload(zpl: string): string {
+  const match = /\^XA[\s\S]*?\^XZ/i.exec(zpl ?? "");
+  return match?.[0] ?? zpl;
+}
+
+function createDefaultInitialBuilderState(seedZpl: string): InitialBuilderState {
+  return {
+    canvasSettings: loadCanvasSettings(),
+    items: parseItemsFromZpl(seedZpl),
+    selectedBarcodeType: "code128",
+    gridSize: 24,
+    gridDarkness: 22,
+    dragMode: "smooth",
+    dragStep: 12,
+    snapToGridEnabled: true,
+    snapToItemsEnabled: true,
+    uploadedGraphics: [],
+    includeSeedGraphics: true,
+    batchRules: [],
+    batchLabelCount: 10
+  };
+}
+
+function resolveInitialBuilderState(seedZpl: string): InitialBuilderState {
+  const fallback = createDefaultInitialBuilderState(seedZpl);
+  const projects = loadStoredBatchProjects();
+  let batchId = extractBatchProjectIdFromZpl(seedZpl);
+  if (!batchId && (seedZpl.match(/\^XA/gi)?.length ?? 0) > 1) {
+    batchId = loadLastBatchProjectId();
+  }
+  if (!batchId) {
+    const singleLabelFallback = extractFirstLabelFromPayload(seedZpl);
+    return {
+      ...fallback,
+      items: parseItemsFromZpl(singleLabelFallback)
+    };
+  }
+  const stored = projects[batchId];
+  if (!stored) {
+    const singleLabelFallback = extractFirstLabelFromPayload(seedZpl);
+    return {
+      ...fallback,
+      items: parseItemsFromZpl(singleLabelFallback)
+    };
+  }
+  return {
+    ...fallback,
+    canvasSettings: stored.canvasSettings ?? fallback.canvasSettings,
+    items: Array.isArray(stored.items) ? stored.items : fallback.items,
+    selectedBarcodeType: stored.selectedBarcodeType ?? fallback.selectedBarcodeType,
+    gridSize: Number.isFinite(stored.gridSize) ? stored.gridSize : fallback.gridSize,
+    gridDarkness: Number.isFinite(stored.gridDarkness) ? stored.gridDarkness : fallback.gridDarkness,
+    dragMode: stored.dragMode === "step" ? "step" : "smooth",
+    dragStep: Number.isFinite(stored.dragStep) ? stored.dragStep : fallback.dragStep,
+    snapToGridEnabled: stored.snapToGridEnabled !== false,
+    snapToItemsEnabled: stored.snapToItemsEnabled !== false,
+    uploadedGraphics: Array.isArray(stored.uploadedGraphics) ? stored.uploadedGraphics : fallback.uploadedGraphics,
+    includeSeedGraphics: stored.includeSeedGraphics !== false,
+    batchRules: Array.isArray(stored.batchRules) ? stored.batchRules : fallback.batchRules,
+    batchLabelCount: Number.isFinite(stored.batchLabelCount) ? Math.max(1, Math.round(stored.batchLabelCount)) : fallback.batchLabelCount
+  };
 }
 
 function unitToMm(value: number, unit: LabelUnit): number {
@@ -1419,6 +1620,36 @@ function isBarcodeElementType(type: BuilderElementType): boolean {
   );
 }
 
+function isBatchGeneratorSupportedType(type: BuilderElementType): boolean {
+  return type === "text" || isBarcodeElementType(type);
+}
+
+function parseTrailingNumericToken(value: string): { prefix: string; suffix: string; start: number; pad: number } {
+  const text = value ?? "";
+  const match = /^(.*?)(\d+)(\D*)$/.exec(text);
+  if (!match) {
+    return {
+      prefix: text,
+      suffix: "",
+      start: 1,
+      pad: 1
+    };
+  }
+  return {
+    prefix: match[1] ?? "",
+    suffix: match[3] ?? "",
+    start: Number.parseInt(match[2] ?? "1", 10) || 1,
+    pad: Math.max(1, (match[2] ?? "").length)
+  };
+}
+
+function formatBatchNumber(value: number, pad: number): string {
+  const rounded = Math.round(value);
+  const sign = rounded < 0 ? "-" : "";
+  const digits = Math.abs(rounded).toString().padStart(Math.max(1, Math.round(pad)), "0");
+  return `${sign}${digits}`;
+}
+
 function normalizeEan13(value: string): string {
   const digits = (value ?? "").replace(/\D/g, "");
   return digits.length >= 12 ? digits.slice(0, 13) : "5901234123457";
@@ -1704,16 +1935,17 @@ function moveSelectedLayer(items: BuilderItem[], selectedId: string, mode: "up" 
 }
 
 export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
-  const [canvasSettings, setCanvasSettings] = useState<BuilderCanvasSettings>(() => loadCanvasSettings());
-  const [items, setItems] = useState<BuilderItem[]>(() => parseItemsFromZpl(seedZpl));
-  const [selectedBarcodeType, setSelectedBarcodeType] = useState<BarcodeElementType>("code128");
+  const initialState = useMemo(() => resolveInitialBuilderState(seedZpl), [seedZpl]);
+  const [canvasSettings, setCanvasSettings] = useState<BuilderCanvasSettings>(() => initialState.canvasSettings);
+  const [items, setItems] = useState<BuilderItem[]>(() => initialState.items);
+  const [selectedBarcodeType, setSelectedBarcodeType] = useState<BarcodeElementType>(() => initialState.selectedBarcodeType);
   const [isDirty, setIsDirty] = useState(false);
-  const [gridSize, setGridSize] = useState(24);
-  const [gridDarkness, setGridDarkness] = useState(22);
-  const [dragMode, setDragMode] = useState<DragMode>("smooth");
-  const [dragStep, setDragStep] = useState(12);
-  const [snapToGridEnabled, setSnapToGridEnabled] = useState(true);
-  const [snapToItemsEnabled, setSnapToItemsEnabled] = useState(true);
+  const [gridSize, setGridSize] = useState(() => initialState.gridSize);
+  const [gridDarkness, setGridDarkness] = useState(() => initialState.gridDarkness);
+  const [dragMode, setDragMode] = useState<DragMode>(() => initialState.dragMode);
+  const [dragStep, setDragStep] = useState(() => initialState.dragStep);
+  const [snapToGridEnabled, setSnapToGridEnabled] = useState(() => initialState.snapToGridEnabled);
+  const [snapToItemsEnabled, setSnapToItemsEnabled] = useState(() => initialState.snapToItemsEnabled);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [draggingId, setDraggingId] = useState<string | null>(null);
@@ -1722,8 +1954,12 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
   const [dragSnapshot, setDragSnapshot] = useState<DragSnapshot[]>([]);
   const [selectionBox, setSelectionBox] = useState<SelectionBoxState | null>(null);
   const [guideLines, setGuideLines] = useState<BuilderGuideLine[]>([]);
-  const [uploadedGraphics, setUploadedGraphics] = useState<UploadedGraphic[]>([]);
-  const [includeSeedGraphics, setIncludeSeedGraphics] = useState<boolean>(true);
+  const [uploadedGraphics, setUploadedGraphics] = useState<UploadedGraphic[]>(() => initialState.uploadedGraphics);
+  const [includeSeedGraphics, setIncludeSeedGraphics] = useState<boolean>(() => initialState.includeSeedGraphics);
+  const [batchRules, setBatchRules] = useState<BatchGeneratorRule[]>(() => initialState.batchRules);
+  const [batchLabelCount, setBatchLabelCount] = useState<number>(() => initialState.batchLabelCount);
+  const [batchNotice, setBatchNotice] = useState<string>("");
+  const [hoveredBatchItemId, setHoveredBatchItemId] = useState<string | null>(null);
   const [accordionOpen, setAccordionOpen] = useState<Record<BuilderAccordionKey, boolean>>({
     canvas: false,
     grid: false,
@@ -1732,7 +1968,8 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     barcodes: false,
     text: false,
     separators: false,
-    shapes: false
+    shapes: false,
+    generator: initialState.batchRules.length > 0
   });
   const [zplAccordionOpen, setZplAccordionOpen] = useState<BuilderZplAccordionKey>("generated");
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -1787,6 +2024,14 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     () => buildZplFromItems(items, canvasWidth, canvasHeight, allGraphicDownloads, allGraphicSizes),
     [items, canvasWidth, canvasHeight, allGraphicDownloads, allGraphicSizes]
   );
+  const batchRuleEntries = useMemo(
+    () =>
+      batchRules
+        .map((rule) => ({ rule, item: items.find((entry) => entry.id === rule.itemId) ?? null }))
+        .filter((entry): entry is { rule: BatchGeneratorRule; item: BuilderItem } => !!entry.item && isBatchGeneratorSupportedType(entry.item.type)),
+    [batchRules, items]
+  );
+  const batchRuleIdSet = useMemo(() => new Set(batchRules.map((entry) => entry.itemId)), [batchRules]);
   const generatedZplLines = useMemo(() => generatedZpl.split("\n"), [generatedZpl]);
   const selectedGeneratedLineIndex = useMemo(() => {
     if (!selectedItem) {
@@ -1891,6 +2136,107 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     setZplAccordionOpen(key);
   };
 
+  const addItemToBatchGenerator = (item: BuilderItem) => {
+    if (!isBatchGeneratorSupportedType(item.type)) {
+      return;
+    }
+    setBatchRules((prev) => {
+      if (prev.some((entry) => entry.itemId === item.id)) {
+        return prev;
+      }
+      const parsed = parseTrailingNumericToken(item.text);
+      setIsDirty(true);
+      return [
+        ...prev,
+        {
+          itemId: item.id,
+          mode: "increment",
+          start: parsed.start,
+          step: 1,
+          pad: parsed.pad,
+          prefix: parsed.prefix,
+          suffix: parsed.suffix
+        }
+      ];
+    });
+  };
+
+  const updateBatchRule = (itemId: string, patch: Partial<BatchGeneratorRule>) => {
+    setIsDirty(true);
+    setBatchRules((prev) => prev.map((entry) => (entry.itemId === itemId ? { ...entry, ...patch } : entry)));
+  };
+
+  const removeBatchRule = (itemId: string) => {
+    setIsDirty(true);
+    setBatchRules((prev) => prev.filter((entry) => entry.itemId !== itemId));
+  };
+
+  const clearBatchGenerator = () => {
+    const batchIdFromSeed = extractBatchProjectIdFromZpl(seedZpl);
+    deleteStoredBatchProject(batchIdFromSeed);
+    setBatchRules([]);
+    setHoveredBatchItemId(null);
+    setBatchNotice("");
+    setIsDirty(true);
+    if (accordionOpen.generator) {
+      setSelectedId(null);
+      setSelectedIds([]);
+    }
+  };
+
+  const generateBatchAndOpenPreview = () => {
+    const safeCount = clamp(Math.round(batchLabelCount), 1, 500);
+    if (!batchRuleEntries.length) {
+      setBatchNotice("Add at least one text/barcode item to generator.");
+      return;
+    }
+    const batchId = `B${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`.toUpperCase();
+    const projectSnapshot: StoredBatchBuilderProject = {
+      id: batchId,
+      savedAt: new Date().toISOString(),
+      canvasSettings,
+      items,
+      selectedBarcodeType,
+      gridSize,
+      gridDarkness,
+      dragMode,
+      dragStep,
+      snapToGridEnabled,
+      snapToItemsEnabled,
+      uploadedGraphics,
+      includeSeedGraphics,
+      batchRules,
+      batchLabelCount: safeCount
+    };
+    saveStoredBatchProject(projectSnapshot);
+    const ruleById = new Map(batchRuleEntries.map((entry) => [entry.rule.itemId, entry.rule]));
+    const labels: string[] = [];
+    for (let index = 0; index < safeCount; index += 1) {
+      const nextItems = items.map((item) => {
+        const rule = ruleById.get(item.id);
+        if (!rule) {
+          return item;
+        }
+        const rawValue = rule.mode === "increment"
+          ? rule.start + rule.step * index
+          : rule.start - rule.step * index;
+        const numeric = formatBatchNumber(rawValue, rule.pad);
+        let nextText = `${rule.prefix}${numeric}${rule.suffix}`;
+        if (item.type === "ean13") {
+          nextText = normalizeEan13(nextText);
+        }
+        return {
+          ...item,
+          text: nextText
+        };
+      });
+      const labelZpl = buildZplFromItems(nextItems, canvasWidth, canvasHeight, allGraphicDownloads, allGraphicSizes);
+      labels.push(injectBatchMarker(labelZpl, batchId, index, safeCount));
+    }
+    setBatchNotice(`Generated ${safeCount} labels.`);
+    onBack(labels.join("\n\n"));
+  };
+
   const selectSingle = (id: string | null) => {
     setSelectedId(id);
     setSelectedIds(id ? [id] : []);
@@ -1959,8 +2305,23 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
   }, [canvasWidth, canvasHeight]);
 
   useEffect(() => {
-    setItems(parseItemsFromZpl(seedZpl));
-    setIncludeSeedGraphics(true);
+    const next = resolveInitialBuilderState(seedZpl);
+    setCanvasSettings(next.canvasSettings);
+    setItems(next.items);
+    setSelectedBarcodeType(next.selectedBarcodeType);
+    setGridSize(next.gridSize);
+    setGridDarkness(next.gridDarkness);
+    setDragMode(next.dragMode);
+    setDragStep(next.dragStep);
+    setSnapToGridEnabled(next.snapToGridEnabled);
+    setSnapToItemsEnabled(next.snapToItemsEnabled);
+    setUploadedGraphics(next.uploadedGraphics);
+    setIncludeSeedGraphics(next.includeSeedGraphics);
+    setBatchRules(next.batchRules);
+    setBatchLabelCount(next.batchLabelCount);
+    setBatchNotice("");
+    setHoveredBatchItemId(null);
+    setAccordionOpen((prev) => ({ ...prev, generator: next.batchRules.length > 0 }));
     setSelectedIds([]);
     setSelectedId(null);
     setDraggingId(null);
@@ -1995,11 +2356,11 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
   }, []);
 
   useEffect(() => {
-    if (!selectedItem) {
+    if (!selectedItem || accordionOpen.generator) {
       return;
     }
     setAccordionOpen((prev) => (prev.selected ? prev : { ...prev, selected: true }));
-  }, [selectedItem]);
+  }, [selectedItem, accordionOpen.generator]);
 
   useEffect(() => {
     if (!draggingId && !resizing && !selectionBox) {
@@ -2119,6 +2480,27 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
 
   const onItemMouseDown = (e: MouseEvent, item: BuilderItem) => {
     if (!canvasRef.current) {
+      return;
+    }
+    if (accordionOpen.generator) {
+      if (isBatchGeneratorSupportedType(item.type)) {
+        addItemToBatchGenerator(item);
+        setBatchNotice(`Added "${item.type}" to generator.`);
+      }
+      if (e.ctrlKey || e.metaKey) {
+        setSelectedIds((prev) => {
+          const exists = prev.includes(item.id);
+          const next = exists ? prev.filter((id) => id !== item.id) : [...prev, item.id];
+          setSelectedId(next.length === 1 ? next[0] : null);
+          return next;
+        });
+      } else {
+        selectSingle(item.id);
+      }
+      setDraggingId(null);
+      setResizing(null);
+      setDragSnapshot([]);
+      setGuideLines([]);
       return;
     }
     if (e.ctrlKey || e.metaKey) {
@@ -2592,6 +2974,26 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [selectedIds, draggingId, resizing, canvasWidth, canvasHeight]);
 
+  useEffect(() => {
+    setBatchRules((prev) =>
+      prev.filter((entry) => {
+        const item = items.find((candidate) => candidate.id === entry.itemId);
+        return !!item && isBatchGeneratorSupportedType(item.type);
+      })
+    );
+  }, [items]);
+
+  useEffect(() => {
+    if (batchRules.length > 0) {
+      return;
+    }
+    setHoveredBatchItemId(null);
+    if (accordionOpen.generator) {
+      setSelectedId(null);
+      setSelectedIds([]);
+    }
+  }, [batchRules.length, accordionOpen.generator]);
+
   return (
       <section className="builder-grid">
         <aside className="builder-sidebar">
@@ -2818,7 +3220,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
               <span>Elements</span>
               <span className="builder-accordion-icon" aria-hidden>{accordionOpen.elements ? "-" : "+"}</span>
             </button>
-            <div className="builder-accordion-body">
+            <div className="builder-accordion-body builder-generator-body">
               <div className="builder-palette">
                 <section className={`builder-sub-accordion${accordionOpen.text ? " is-open" : ""}`}>
                   <button type="button" className="builder-sub-accordion-toggle" onClick={() => toggleAccordion("text")} aria-expanded={accordionOpen.text}>
@@ -3156,13 +3558,106 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
               )}
             </div>
           </section>
+          <hr className="builder-sidebar-divider" />
+          <section className={`builder-accordion builder-accordion-generator${accordionOpen.generator ? " is-open" : ""}`}>
+            <button type="button" className="builder-accordion-toggle" onClick={() => toggleAccordion("generator")} aria-expanded={accordionOpen.generator}>
+              <span>Batch Generator</span>
+              <span className="builder-accordion-icon" aria-hidden>{accordionOpen.generator ? "-" : "+"}</span>
+            </button>
+            <div className="builder-accordion-body">
+              <p className="muted">Open this panel, then click text/barcode items on canvas to add them.</p>
+              <p className="muted">When open: click only selects/adds; moving elements is temporarily disabled.</p>
+              <div className="builder-generator-count">
+                <label htmlFor="builder-batch-count">Labels count</label>
+                <input
+                  id="builder-batch-count"
+                  type="number"
+                  min={1}
+                  max={500}
+                  value={batchLabelCount}
+                  onChange={(e) => {
+                    const value = Number(e.target.value);
+                    setBatchLabelCount(Number.isFinite(value) ? clamp(value, 1, 500) : 1);
+                  }}
+                />
+              </div>
+              {!!batchRuleEntries.length && (
+                <div className="builder-generator-list">
+                  {batchRuleEntries.map(({ rule, item }) => (
+                    <div
+                      key={rule.itemId}
+                      className="builder-generator-rule"
+                      onMouseEnter={() => setHoveredBatchItemId(rule.itemId)}
+                      onMouseLeave={() => setHoveredBatchItemId((prev) => (prev === rule.itemId ? null : prev))}
+                    >
+                      <p className="builder-generator-title">
+                        {item.type.toUpperCase()} | {item.text || "(empty)"}
+                      </p>
+                      <label>
+                        Mode
+                        <select
+                          value={rule.mode}
+                          onChange={(e) => updateBatchRule(rule.itemId, { mode: e.target.value as BatchMode })}
+                        >
+                          <option value="increment">Increment</option>
+                          <option value="decrement">Decrement</option>
+                        </select>
+                      </label>
+                      <label>
+                        Start
+                        <input
+                          type="number"
+                          value={rule.start}
+                          onChange={(e) => updateBatchRule(rule.itemId, { start: Math.round(Number(e.target.value) || 0) })}
+                        />
+                      </label>
+                      <label>
+                        Step
+                        <input
+                          type="number"
+                          min={1}
+                          value={rule.step}
+                          onChange={(e) => updateBatchRule(rule.itemId, { step: Math.max(1, Math.round(Number(e.target.value) || 1)) })}
+                        />
+                      </label>
+                      <label>
+                        Pad
+                        <input
+                          type="number"
+                          min={1}
+                          max={12}
+                          value={rule.pad}
+                          onChange={(e) => updateBatchRule(rule.itemId, { pad: clamp(Math.round(Number(e.target.value) || 1), 1, 12) })}
+                        />
+                      </label>
+                      <button type="button" className="download-btn" onClick={() => removeBatchRule(rule.itemId)}>
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {!batchRuleEntries.length && (
+                <p className="muted">No generator items yet.</p>
+              )}
+              {!!batchNotice && <p className="muted">{batchNotice}</p>}
+              <div className="builder-generator-actions">
+                <button type="button" className="download-btn" onClick={clearBatchGenerator} disabled={!batchRuleEntries.length}>
+                  Clear Generator
+                </button>
+                <button type="button" className="download-btn" onClick={generateBatchAndOpenPreview}>
+                  Generate
+                </button>
+              </div>
+            </div>
+          </section>
         </aside>
 
         <section className="builder-canvas-wrap">
           <h2>Label</h2>
           <div
             ref={canvasRef}
-            className="builder-canvas"
+            className={`builder-canvas${accordionOpen.generator ? " is-generator-mode" : ""}`}
             style={{
               width: `${canvasWidth * viewScale}px`,
               height: `${canvasHeight * viewScale}px`,
@@ -3203,7 +3698,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
             {[...items].filter((item) => !item.hidden).sort((a, b) => a.zIndex - b.zIndex).map((item) => (
               <div
                 key={item.id}
-                className={`builder-item builder-item-${item.type}${selectedIds.includes(item.id) ? " is-selected" : ""}${item.filled ? " is-filled" : ""}${item.locked ? " is-locked" : ""}`}
+                className={`builder-item builder-item-${item.type}${selectedIds.includes(item.id) ? " is-selected" : ""}${item.filled ? " is-filled" : ""}${item.locked ? " is-locked" : ""}${batchRuleIdSet.has(item.id) ? " is-in-generator" : ""}${hoveredBatchItemId === item.id ? " is-generator-hover" : ""}`}
                 style={{
                   left: `${item.x * viewScale}px`,
                   top: `${item.y * viewScale}px`,

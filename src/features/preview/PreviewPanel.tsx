@@ -479,7 +479,7 @@ export function PreviewPanel({
             >
               ↻
             </button>
-            <button type="button" className="rotate-btn" onClick={() => onOpenBuilder(selectedLabel.zpl)}>
+            <button type="button" className="rotate-btn" onClick={() => onOpenBuilder()}>
               Open In Builder
             </button>
           </div>
