@@ -47,6 +47,8 @@ type BuilderItem = {
   textWidthRatio?: number;
   locked?: boolean;
   hidden?: boolean;
+  showText?: boolean;
+  lockAspectRatio?: boolean;
   filled: boolean;
   zIndex: number;
   font: ZplFont;
@@ -67,6 +69,7 @@ type ResizeState = {
   startMouseY: number;
   startWidth: number;
   startHeight: number;
+  lockAspectRatio: boolean;
 };
 
 type SelectionBoxState = {
@@ -148,6 +151,8 @@ type InitialBuilderState = {
   batchLabelCount: number;
 };
 
+type BuilderHistorySnapshot = InitialBuilderState;
+
 const LS_PREVIEW_SETTINGS_KEY = "zplremix.preview.settings";
 const LS_BUILDER_BATCH_PROJECTS_KEY = "zplremix.builder.batch.projects";
 const LS_BUILDER_LAST_BATCH_ID_KEY = "zplremix.builder.batch.last_id";
@@ -158,6 +163,7 @@ const QR_EFFECTIVE_SIZE_MAX = 293;
 const DATAMATRIX_EFFECTIVE_SIZE_MAX = 299;
 const TEXT_WIDTH_RATIO_MIN = 0.2;
 const TEXT_WIDTH_RATIO_MAX = 64;
+const BUILDER_HISTORY_LIMIT = 80;
 const TABLE_META_PREFIX = "ZPLRMX_TABLE";
 const SHADE_META_PREFIX = "ZPLRMX_SHADE";
 const BATCH_META_PREFIX = "ZPLRMX_BATCH";
@@ -442,6 +448,7 @@ function createItem(type: BuilderElementType, x: number, y: number, zIndex: numb
       textWidthRatio: 0.6,
       locked: false,
       hidden: false,
+      lockAspectRatio: true,
       filled: false,
       zIndex,
       font,
@@ -483,28 +490,28 @@ function createItem(type: BuilderElementType, x: number, y: number, zIndex: numb
     };
   }
   if (type === "code128") {
-    return { id: crypto.randomUUID(), type, x, y, width: 280, height: 120, text: "1234567890", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
+    return { id: crypto.randomUUID(), type, x, y, width: 280, height: 120, text: "1234567890", locked: false, hidden: false, showText: true, filled: false, zIndex, font: "0", orientation: "N" };
   }
   if (type === "gs1128") {
-    return { id: crypto.randomUUID(), type, x, y, width: 300, height: 120, text: "(00)012345678901234567", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
+    return { id: crypto.randomUUID(), type, x, y, width: 300, height: 120, text: "(00)012345678901234567", locked: false, hidden: false, showText: true, filled: false, zIndex, font: "0", orientation: "N" };
   }
   if (type === "itf14") {
-    return { id: crypto.randomUUID(), type, x, y, width: 280, height: 110, text: "01234567890123", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
+    return { id: crypto.randomUUID(), type, x, y, width: 280, height: 110, text: "01234567890123", locked: false, hidden: false, showText: true, filled: false, zIndex, font: "0", orientation: "N" };
   }
   if (type === "code39") {
-    return { id: crypto.randomUUID(), type, x, y, width: 280, height: 110, text: "CODE39-123", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
+    return { id: crypto.randomUUID(), type, x, y, width: 280, height: 110, text: "CODE39-123", locked: false, hidden: false, showText: true, filled: false, zIndex, font: "0", orientation: "N" };
   }
   if (type === "pdf417") {
     return { id: crypto.randomUUID(), type, x, y, width: 280, height: 140, text: "PDF417 SAMPLE DATA", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
   }
   if (type === "qr") {
-    return { id: crypto.randomUUID(), type, x, y, width: 120, height: 120, text: "https://zplremix.local", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
+    return { id: crypto.randomUUID(), type, x, y, width: 120, height: 120, text: "https://zplremix.local", locked: false, hidden: false, lockAspectRatio: true, filled: false, zIndex, font: "0", orientation: "N" };
   }
   if (type === "datamatrix") {
-    return { id: crypto.randomUUID(), type, x, y, width: 120, height: 120, text: "DMX-123456", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
+    return { id: crypto.randomUUID(), type, x, y, width: 120, height: 120, text: "DMX-123456", locked: false, hidden: false, lockAspectRatio: true, filled: false, zIndex, font: "0", orientation: "N" };
   }
   if (type === "ean13") {
-    return { id: crypto.randomUUID(), type, x, y, width: 260, height: 110, text: "5901234123457", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
+    return { id: crypto.randomUUID(), type, x, y, width: 260, height: 110, text: "5901234123457", locked: false, hidden: false, showText: true, filled: false, zIndex, font: "0", orientation: "N" };
   }
   if (type === "line") {
     return { id: crypto.randomUUID(), type, x, y, width: 280, height: 4, text: "", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
@@ -519,10 +526,10 @@ function createItem(type: BuilderElementType, x: number, y: number, zIndex: numb
     return { id: crypto.randomUUID(), type, x, y, width: 200, height: 120, text: "55", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
   }
   if (type === "circle") {
-    return { id: crypto.randomUUID(), type, x, y, width: 120, height: 120, text: "", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
+    return { id: crypto.randomUUID(), type, x, y, width: 120, height: 120, text: "", locked: false, hidden: false, lockAspectRatio: true, filled: false, zIndex, font: "0", orientation: "N" };
   }
   if (type === "ellipse") {
-    return { id: crypto.randomUUID(), type, x, y, width: 180, height: 120, text: "", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
+    return { id: crypto.randomUUID(), type, x, y, width: 180, height: 120, text: "", locked: false, hidden: false, lockAspectRatio: true, filled: false, zIndex, font: "0", orientation: "N" };
   }
   return { id: crypto.randomUUID(), type, x, y, width: 240, height: 120, text: "", locked: false, hidden: false, filled: false, zIndex, font: "0", orientation: "N" };
 }
@@ -773,6 +780,92 @@ function estimateLinearBarcodeWidthDots(type: BuilderElementType, rawValue: stri
   return Math.max(160, Math.round((code128Chars * 11 + 70) * safeModule));
 }
 
+function getLinearBarcodePayload(item: BuilderItem): string {
+  if (item.type === "ean13") {
+    return normalizeEan13(item.text);
+  }
+  if (item.type === "itf14") {
+    return item.text.replace(/\D/g, "").slice(0, 14) || "01234567890123";
+  }
+  if (item.type === "gs1128") {
+    return item.text.startsWith(">8") ? item.text : `>8${item.text}`;
+  }
+  return item.text;
+}
+
+function getLinearBarcodeModuleWidth(item: BuilderItem): number {
+  const payload = getLinearBarcodePayload(item);
+  const effectiveType = item.type === "gs1128" ? "code128" : item.type;
+  const baseWidth = estimateLinearBarcodeWidthDots(effectiveType, payload, 1);
+  return clamp(Math.round(Math.max(12, item.width) / Math.max(1, baseWidth)), 1, 10);
+}
+
+function getTextFontHeight(item: BuilderItem): number {
+  return Math.max(14, Math.round(item.height * 0.8));
+}
+
+function getTextCharacterWidth(item: BuilderItem): number {
+  return Math.max(8, Math.round(getTextFontHeight(item) * clamp(item.textWidthRatio ?? 0.6, TEXT_WIDTH_RATIO_MIN, TEXT_WIDTH_RATIO_MAX)));
+}
+
+function getQrModuleSize(item: BuilderItem): number {
+  return clamp(Math.round(Math.min(item.width, item.height) / 28), 2, 10);
+}
+
+function getDatamatrixModuleSize(item: BuilderItem): number {
+  return clamp(Math.round(Math.min(item.width, item.height) / 24), 3, 12);
+}
+
+function getPdf417ColumnWidth(item: BuilderItem): number {
+  return clamp(Math.round(item.width / 42), 2, 30);
+}
+
+function getPdf417Rows(item: BuilderItem): number {
+  return clamp(Math.round(item.height / 16), 3, 30);
+}
+
+function getDimensionLabels(item: BuilderItem): { width: string; height: string } {
+  if (item.type === "text") {
+    return { width: "Box W", height: "Box H" };
+  }
+  if (isLinearBarcodeElementType(item.type)) {
+    return { width: "Target W", height: "Bar H" };
+  }
+  if (item.type === "qr" || item.type === "datamatrix") {
+    return { width: "Symbol W", height: "Symbol H" };
+  }
+  if (item.type === "pdf417") {
+    return { width: "Target W", height: "Target H" };
+  }
+  return { width: "W", height: "H" };
+}
+
+function getEffectiveDetails(item: BuilderItem): string[] {
+  if (item.type === "text") {
+    return [`^A height ${getTextFontHeight(item)}`, `char width ${getTextCharacterWidth(item)}`];
+  }
+  if (isLinearBarcodeElementType(item.type)) {
+    const moduleWidth = getLinearBarcodeModuleWidth(item);
+    const effectiveType = item.type === "gs1128" ? "code128" : item.type;
+    const effectiveWidth = estimateLinearBarcodeWidthDots(effectiveType, getLinearBarcodePayload(item), moduleWidth);
+    return [`^BY module ${moduleWidth}`, `effective W ${effectiveWidth}`, `bar H ${Math.max(40, Math.round(item.height))}`];
+  }
+  if (item.type === "qr") {
+    const moduleSize = getQrModuleSize(item);
+    const effective = estimateQrBoxSize(item.text, moduleSize);
+    return [`^BQ magnification ${moduleSize}`, `effective ${effective.width} x ${effective.height}`];
+  }
+  if (item.type === "datamatrix") {
+    const moduleSize = getDatamatrixModuleSize(item);
+    const effective = estimateDatamatrixBoxSize(item.text, moduleSize);
+    return [`^BX module ${moduleSize}`, `effective ${effective.width} x ${effective.height}`];
+  }
+  if (item.type === "pdf417") {
+    return [`^B7 column width ${getPdf417ColumnWidth(item)}`, `rows ${getPdf417Rows(item)}`];
+  }
+  return [`${Math.round(item.width)} x ${Math.round(item.height)} dots`];
+}
+
 function buildItemFingerprint(item: BuilderItem): string {
   return [
     item.type,
@@ -784,6 +877,7 @@ function buildItemFingerprint(item: BuilderItem): string {
     item.font,
     item.locked ? "1" : "0",
     item.hidden ? "1" : "0",
+    item.showText === false ? "0" : "1",
     item.filled ? "1" : "0"
   ].join("|");
 }
@@ -1045,24 +1139,32 @@ function buildZplFromItems(
     }
     if (item.type === "code128") {
       const barHeight = Math.max(40, Math.round(item.height));
-      lines.push(`^FO${x},${y}^BY2,2,${barHeight}^BC${item.orientation},${barHeight},Y,N,N^FD${item.text}^FS`);
+      const moduleWidth = getLinearBarcodeModuleWidth(item);
+      const showText = item.showText === false ? "N" : "Y";
+      lines.push(`^FO${x},${y}^BY${moduleWidth},2,${barHeight}^BC${item.orientation},${barHeight},${showText},N,N^FD${item.text}^FS`);
       return;
     }
     if (item.type === "gs1128") {
       const barHeight = Math.max(40, Math.round(item.height));
       const payload = item.text.startsWith(">8") ? item.text : `>8${item.text}`;
-      lines.push(`^FO${x},${y}^BY2,2,${barHeight}^BC${item.orientation},${barHeight},Y,N,N^FD${payload}^FS`);
+      const moduleWidth = getLinearBarcodeModuleWidth(item);
+      const showText = item.showText === false ? "N" : "Y";
+      lines.push(`^FO${x},${y}^BY${moduleWidth},2,${barHeight}^BC${item.orientation},${barHeight},${showText},N,N^FD${payload}^FS`);
       return;
     }
     if (item.type === "itf14") {
       const barHeight = Math.max(40, Math.round(item.height));
       const digits = item.text.replace(/\D/g, "").slice(0, 14) || "01234567890123";
-      lines.push(`^FO${x},${y}^BY2,2,${barHeight}^B2${item.orientation},${barHeight},Y,N,N^FD${digits}^FS`);
+      const moduleWidth = getLinearBarcodeModuleWidth(item);
+      const showText = item.showText === false ? "N" : "Y";
+      lines.push(`^FO${x},${y}^BY${moduleWidth},2,${barHeight}^B2${item.orientation},${barHeight},${showText},N,N^FD${digits}^FS`);
       return;
     }
     if (item.type === "code39") {
       const barHeight = Math.max(40, Math.round(item.height));
-      lines.push(`^FO${x},${y}^BY2,2,${barHeight}^B3${item.orientation},N,${barHeight},Y,N^FD${item.text}^FS`);
+      const moduleWidth = getLinearBarcodeModuleWidth(item);
+      const showText = item.showText === false ? "N" : "Y";
+      lines.push(`^FO${x},${y}^BY${moduleWidth},2,${barHeight}^B3${item.orientation},N,${barHeight},${showText},N^FD${item.text}^FS`);
       return;
     }
     if (item.type === "pdf417") {
@@ -1086,7 +1188,9 @@ function buildZplFromItems(
     if (item.type === "ean13") {
       const barHeight = Math.max(40, Math.round(item.height));
       const digits = item.text.replace(/\D/g, "").slice(0, 13) || "5901234123457";
-      lines.push(`^FO${x},${y}^BY2,2,${barHeight}^BE${item.orientation},${barHeight},Y,N^FD${digits}^FS`);
+      const moduleWidth = getLinearBarcodeModuleWidth(item);
+      const showText = item.showText === false ? "N" : "Y";
+      lines.push(`^FO${x},${y}^BY${moduleWidth},2,${barHeight}^BE${item.orientation},${barHeight},${showText},N^FD${digits}^FS`);
       return;
     }
     if (item.type === "line") {
@@ -1146,6 +1250,7 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
         ...item,
         locked: false,
         hidden: false,
+        lockAspectRatio: item.lockAspectRatio ?? supportsAspectRatioLock(item.type),
         sourceCommand: command,
         sourceBody: body,
         sourceAnchorX: rawX,
@@ -1405,6 +1510,7 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
       const beArgs = parseZplCommandArgs(body, "BE");
       const orientation = normalizeOrientation(beArgs[0] || fieldOrientation);
       const barHeight = parseBarcodeHeight(beArgs, byHeight);
+      const showText = (beArgs[2] ?? "Y").trim().toUpperCase() !== "N";
       const payload = fd?.[1] ?? "5901234123457";
       const estimatedWidth = estimateLinearBarcodeWidthDots("ean13", payload, byModule);
       const position = mapFieldPosition(
@@ -1423,6 +1529,7 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
         width: position.width,
         height: position.height,
         text: payload,
+        showText,
         filled: false,
         zIndex: items.length,
         font: "0",
@@ -1471,6 +1578,7 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
       const b2Args = parseZplCommandArgs(body, "B2");
       const orientation = normalizeOrientation(b2Args[0] || fieldOrientation);
       const barHeight = parseBarcodeHeight(b2Args, byHeight);
+      const showText = (b2Args[2] ?? "Y").trim().toUpperCase() !== "N";
       const payload = fd?.[1] ?? "01234567890123";
       const estimatedWidth = estimateLinearBarcodeWidthDots("itf14", payload, byModule);
       const position = mapFieldPosition(
@@ -1489,6 +1597,7 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
         width: position.width,
         height: position.height,
         text: payload,
+        showText,
         filled: false,
         zIndex: items.length,
         font: "0",
@@ -1505,6 +1614,7 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
       const b3Args = parseZplCommandArgs(body, "B3");
       const orientation = normalizeOrientation(b3Args[0] || fieldOrientation);
       const barHeight = parseBarcodeHeight(["", b3Args[2] ?? ""], byHeight);
+      const showText = (b3Args[3] ?? "Y").trim().toUpperCase() !== "N";
       const payload = fd?.[1] ?? "CODE39-123";
       const estimatedWidth = estimateLinearBarcodeWidthDots("code39", payload, byModule);
       const position = mapFieldPosition(
@@ -1523,6 +1633,7 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
         width: position.width,
         height: position.height,
         text: payload,
+        showText,
         filled: false,
         zIndex: items.length,
         font: "0",
@@ -1539,6 +1650,7 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
       const bcArgs = parseZplCommandArgs(body, "BC");
       const orientation = normalizeOrientation(bcArgs[0] || fieldOrientation);
       const barHeight = parseBarcodeHeight(bcArgs, byHeight);
+      const showText = (bcArgs[2] ?? "Y").trim().toUpperCase() !== "N";
       const payload = fd?.[1] ?? "1234567890";
       const estimatedWidth = estimateLinearBarcodeWidthDots("code128", payload, byModule);
       const position = mapFieldPosition(
@@ -1557,6 +1669,7 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
         width: position.width,
         height: position.height,
         text: payload,
+        showText,
         filled: false,
         zIndex: items.length,
         font: "0",
@@ -1633,6 +1746,10 @@ function isBarcodeElementType(type: BuilderElementType): boolean {
     type === "datamatrix" ||
     type === "ean13"
   );
+}
+
+function isLinearBarcodeElementType(type: BuilderElementType): type is "code128" | "gs1128" | "itf14" | "code39" | "ean13" {
+  return type === "code128" || type === "gs1128" || type === "itf14" || type === "code39" || type === "ean13";
 }
 
 function isBatchGeneratorSupportedType(type: BuilderElementType): boolean {
@@ -1927,6 +2044,10 @@ function isFillableType(type: BuilderElementType): boolean {
   return type === "box" || type === "circle" || type === "ellipse";
 }
 
+function supportsAspectRatioLock(type: BuilderElementType): boolean {
+  return type === "graphic" || type === "qr" || type === "datamatrix" || type === "circle" || type === "ellipse";
+}
+
 function moveSelectedLayer(items: BuilderItem[], selectedId: string, mode: "up" | "down" | "front" | "back"): BuilderItem[] {
   const ordered = [...items].sort((a, b) => a.zIndex - b.zIndex);
   const index = ordered.findIndex((item) => item.id === selectedId);
@@ -1975,6 +2096,9 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
   const [batchLabelCount, setBatchLabelCount] = useState<number>(() => initialState.batchLabelCount);
   const [batchNotice, setBatchNotice] = useState<string>("");
   const [hoveredBatchItemId, setHoveredBatchItemId] = useState<string | null>(null);
+  const undoStackRef = useRef<BuilderHistorySnapshot[]>([]);
+  const redoStackRef = useRef<BuilderHistorySnapshot[]>([]);
+  const [historyAvailability, setHistoryAvailability] = useState({ canUndo: false, canRedo: false });
   const [accordionOpen, setAccordionOpen] = useState<Record<BuilderAccordionKey, boolean>>({
     canvas: false,
     grid: false,
@@ -1989,6 +2113,95 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
   const [zplAccordionOpen, setZplAccordionOpen] = useState<BuilderZplAccordionKey>("generated");
   const canvasRef = useRef<HTMLDivElement>(null);
   const graphicFileInputRef = useRef<HTMLInputElement>(null);
+
+  const cloneHistorySnapshot = (snapshot: BuilderHistorySnapshot): BuilderHistorySnapshot => ({
+    ...snapshot,
+    canvasSettings: { ...snapshot.canvasSettings },
+    items: snapshot.items.map((item) => ({ ...item })),
+    uploadedGraphics: snapshot.uploadedGraphics.map((entry) => ({ ...entry })),
+    batchRules: snapshot.batchRules.map((entry) => ({ ...entry }))
+  });
+
+  const captureHistorySnapshot = (): BuilderHistorySnapshot => ({
+    canvasSettings: { ...canvasSettings },
+    items: items.map((item) => ({ ...item })),
+    selectedBarcodeType,
+    gridSize,
+    gridDarkness,
+    dragMode,
+    dragStep,
+    snapToGridEnabled,
+    snapToItemsEnabled,
+    uploadedGraphics: uploadedGraphics.map((entry) => ({ ...entry })),
+    includeSeedGraphics,
+    batchRules: batchRules.map((entry) => ({ ...entry })),
+    batchLabelCount
+  });
+
+  const refreshHistoryAvailability = () => {
+    setHistoryAvailability({
+      canUndo: undoStackRef.current.length > 0,
+      canRedo: redoStackRef.current.length > 0
+    });
+  };
+
+  const pushUndoSnapshot = () => {
+    undoStackRef.current.push(cloneHistorySnapshot(captureHistorySnapshot()));
+    if (undoStackRef.current.length > BUILDER_HISTORY_LIMIT) {
+      undoStackRef.current.shift();
+    }
+    redoStackRef.current = [];
+    refreshHistoryAvailability();
+  };
+
+  const restoreHistorySnapshot = (snapshot: BuilderHistorySnapshot) => {
+    const next = cloneHistorySnapshot(snapshot);
+    setCanvasSettings(next.canvasSettings);
+    setItems(next.items);
+    setSelectedBarcodeType(next.selectedBarcodeType);
+    setGridSize(next.gridSize);
+    setGridDarkness(next.gridDarkness);
+    setDragMode(next.dragMode);
+    setDragStep(next.dragStep);
+    setSnapToGridEnabled(next.snapToGridEnabled);
+    setSnapToItemsEnabled(next.snapToItemsEnabled);
+    setUploadedGraphics(next.uploadedGraphics);
+    setIncludeSeedGraphics(next.includeSeedGraphics);
+    setBatchRules(next.batchRules);
+    setBatchLabelCount(next.batchLabelCount);
+    setBatchNotice("");
+    setHoveredBatchItemId(null);
+    setDraggingId(null);
+    setResizing(null);
+    setDragSnapshot([]);
+    setSelectionBox(null);
+    setGuideLines([]);
+    setSelectedId(null);
+    setSelectedIds([]);
+    setIsDirty(true);
+  };
+
+  const undoBuilderChange = () => {
+    const previous = undoStackRef.current.pop();
+    if (!previous) {
+      refreshHistoryAvailability();
+      return;
+    }
+    redoStackRef.current.push(cloneHistorySnapshot(captureHistorySnapshot()));
+    restoreHistorySnapshot(previous);
+    refreshHistoryAvailability();
+  };
+
+  const redoBuilderChange = () => {
+    const next = redoStackRef.current.pop();
+    if (!next) {
+      refreshHistoryAvailability();
+      return;
+    }
+    undoStackRef.current.push(cloneHistorySnapshot(captureHistorySnapshot()));
+    restoreHistorySnapshot(next);
+    refreshHistoryAvailability();
+  };
 
   const canvasWidth = useMemo(() => {
     const mm = unitToMm(canvasSettings.labelWidth, canvasSettings.labelUnit);
@@ -2024,6 +2237,14 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     }
     return items.find((item) => item.id === selectedIds[0]) ?? null;
   }, [items, selectedIds]);
+  const selectedDimensionLabels = useMemo(
+    () => selectedItem ? getDimensionLabels(selectedItem) : { width: "W", height: "H" },
+    [selectedItem]
+  );
+  const selectedEffectiveDetails = useMemo(
+    () => selectedItem ? getEffectiveDetails(selectedItem) : [],
+    [selectedItem]
+  );
   const hiddenCount = useMemo(() => items.filter((item) => item.hidden).length, [items]);
   const sourceGraphicDownloads = useMemo(
     () => (includeSeedGraphics ? extractGraphicDownloadCommands(seedZpl) : []),
@@ -2053,6 +2274,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     () => buildZplFromItems(items, canvasWidth, canvasHeight, allGraphicDownloads, allGraphicSizes),
     [items, canvasWidth, canvasHeight, allGraphicDownloads, allGraphicSizes]
   );
+  const [builderPreviewZpl, setBuilderPreviewZpl] = useState(generatedZpl);
   const batchRuleEntries = useMemo(
     () =>
       batchRules
@@ -2062,6 +2284,17 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
   );
   const batchRuleIdSet = useMemo(() => new Set(batchRules.map((entry) => entry.itemId)), [batchRules]);
   const generatedZplLines = useMemo(() => generatedZpl.split("\n"), [generatedZpl]);
+  useEffect(() => {
+    if (!draggingId && !resizing) {
+      setBuilderPreviewZpl(generatedZpl);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setBuilderPreviewZpl(generatedZpl);
+    }, 80);
+    return () => window.clearTimeout(timer);
+  }, [draggingId, generatedZpl, resizing]);
+
   const selectedGeneratedLineIndex = useMemo(() => {
     if (!selectedItem) {
       return -1;
@@ -2151,10 +2384,43 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
   const safeDragStep = clamp(Math.round(dragStep), 1, 64);
   const gridAlpha = clamp(safeGridDarkness / 100, 0.08, 0.65);
 
-  const onGridSizeChange = (value: number) => setGridSize(clamp(Math.round(value), 8, 80));
-  const onGridDarknessChange = (value: number) => setGridDarkness(clamp(Math.round(value), 8, 65));
-  const onDragStepChange = (value: number) => setDragStep(clamp(Math.round(value), 1, 64));
+  const onGridSizeChange = (value: number) => {
+    pushUndoSnapshot();
+    setGridSize(clamp(Math.round(value), 8, 80));
+    setIsDirty(true);
+  };
+  const onGridDarknessChange = (value: number) => {
+    pushUndoSnapshot();
+    setGridDarkness(clamp(Math.round(value), 8, 65));
+    setIsDirty(true);
+  };
+  const onDragStepChange = (value: number) => {
+    pushUndoSnapshot();
+    setDragStep(clamp(Math.round(value), 1, 64));
+    setIsDirty(true);
+  };
+  const onDragModeChange = (value: DragMode) => {
+    pushUndoSnapshot();
+    setDragMode(value);
+    setIsDirty(true);
+  };
+  const onSnapToGridChange = (value: boolean) => {
+    pushUndoSnapshot();
+    setSnapToGridEnabled(value);
+    setIsDirty(true);
+  };
+  const onSnapToItemsChange = (value: boolean) => {
+    pushUndoSnapshot();
+    setSnapToItemsEnabled(value);
+    setIsDirty(true);
+  };
+  const onSelectedBarcodeTypeChange = (value: BarcodeElementType) => {
+    pushUndoSnapshot();
+    setSelectedBarcodeType(value);
+    setIsDirty(true);
+  };
   const updateCanvasSettings = (updater: (prev: BuilderCanvasSettings) => BuilderCanvasSettings) => {
+    pushUndoSnapshot();
     setCanvasSettings((prev) => updater(prev));
     setIsDirty(true);
   };
@@ -2169,6 +2435,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     if (!isBatchGeneratorSupportedType(item.type)) {
       return;
     }
+    pushUndoSnapshot();
     setBatchRules((prev) => {
       if (prev.some((entry) => entry.itemId === item.id)) {
         return prev;
@@ -2191,16 +2458,19 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
   };
 
   const updateBatchRule = (itemId: string, patch: Partial<BatchGeneratorRule>) => {
+    pushUndoSnapshot();
     setIsDirty(true);
     setBatchRules((prev) => prev.map((entry) => (entry.itemId === itemId ? { ...entry, ...patch } : entry)));
   };
 
   const removeBatchRule = (itemId: string) => {
+    pushUndoSnapshot();
     setIsDirty(true);
     setBatchRules((prev) => prev.filter((entry) => entry.itemId !== itemId));
   };
 
   const clearBatchGenerator = () => {
+    pushUndoSnapshot();
     const batchIdFromSeed = extractBatchProjectIdFromZpl(seedZpl);
     deleteStoredBatchProject(batchIdFromSeed);
     setBatchRules([]);
@@ -2357,6 +2627,9 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     setDragSnapshot([]);
     setSelectionBox(null);
     setIsDirty(false);
+    undoStackRef.current = [];
+    redoStackRef.current = [];
+    refreshHistoryAvailability();
   }, [seedZpl]);
 
   useEffect(() => {
@@ -2448,6 +2721,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     const pos = resolveDragPosition(rawX, rawY, draft, items);
     draft.x = pos.x;
     draft.y = pos.y;
+    pushUndoSnapshot();
     setItems((prev) => [...prev, draft]);
     selectSingle(draft.id);
     setIsDirty(true);
@@ -2466,6 +2740,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     try {
       const name = normalizeGraphicNameFromFilename(file.name);
       const uploaded = await pngToDg(file, name);
+      pushUndoSnapshot();
       setUploadedGraphics((prev) => {
         const filtered = prev.filter((entry) => entry.name !== uploaded.name);
         return [...filtered, uploaded];
@@ -2565,6 +2840,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
         zIndex: maxZ + index + 1
       }));
       const anchorCloneId = idMap.get(item.id) ?? clones[0].id;
+      pushUndoSnapshot();
       setItems((prev) => [...prev, ...clones]);
       setSelectedIds(clones.map((clone) => clone.id));
       setSelectedId(anchorCloneId);
@@ -2584,6 +2860,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
       setDragSnapshot([]);
       return;
     }
+    pushUndoSnapshot();
     setDraggingId(item.id);
     setDragOffset({ x: x - item.x, y: y - item.y });
     setDragSnapshot(items.filter((entry) => movingIds.includes(entry.id)).map((entry) => ({ id: entry.id, x: entry.x, y: entry.y })));
@@ -2601,6 +2878,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     const rect = canvasRef.current.getBoundingClientRect();
     const x = (e.clientX - rect.left) / viewScale;
     const y = (e.clientY - rect.top) / viewScale;
+    pushUndoSnapshot();
     selectSingle(item.id);
     setDraggingId(null);
     setResizing({
@@ -2609,7 +2887,8 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
       startMouseX: x,
       startMouseY: y,
       startWidth: item.width,
-      startHeight: item.height
+      startHeight: item.height,
+      lockAspectRatio: supportsAspectRatioLock(item.type) && (item.lockAspectRatio === true || e.shiftKey)
     });
   };
 
@@ -2634,6 +2913,18 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
           const useY = resizing.axis === "bottom" || resizing.axis === "corner";
           let nextWidth = useX ? resizing.startWidth + deltaX : item.width;
           let nextHeight = useY ? resizing.startHeight + deltaY : item.height;
+          if (resizing.lockAspectRatio) {
+            const ratio = Math.max(0.01, resizing.startWidth / Math.max(1, resizing.startHeight));
+            if (resizing.axis === "right") {
+              nextHeight = nextWidth / ratio;
+            } else if (resizing.axis === "bottom") {
+              nextWidth = nextHeight * ratio;
+            } else if (Math.abs(deltaX) >= Math.abs(deltaY)) {
+              nextHeight = nextWidth / ratio;
+            } else {
+              nextWidth = nextHeight * ratio;
+            }
+          }
           if (dragMode === "step") {
             if (useX) nextWidth = snapToStep(nextWidth, safeDragStep);
             if (useY) nextHeight = snapToStep(nextHeight, safeDragStep);
@@ -2657,6 +2948,20 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
           }
           if (useX) nextWidth = Math.max(minSize.width, nextWidth);
           if (useY) nextHeight = Math.max(minSize.height, nextHeight);
+          if (resizing.lockAspectRatio) {
+            const ratio = Math.max(0.01, resizing.startWidth / Math.max(1, resizing.startHeight));
+            if (resizing.axis === "right") {
+              nextHeight = nextWidth / ratio;
+            } else if (resizing.axis === "bottom") {
+              nextWidth = nextHeight * ratio;
+            } else if (Math.abs(deltaX) >= Math.abs(deltaY)) {
+              nextHeight = nextWidth / ratio;
+            } else {
+              nextWidth = nextHeight * ratio;
+            }
+            nextWidth = Math.max(minSize.width, nextWidth);
+            nextHeight = Math.max(minSize.height, nextHeight);
+          }
           let nextTextWidthRatio = item.textWidthRatio;
           if (item.type === "text") {
             if (useX) {
@@ -2695,8 +3000,8 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
           return {
             ...item,
             textWidthRatio: item.type === "text" ? nextTextWidthRatio : item.textWidthRatio,
-            width: useX ? clamp(nextWidth, minSize.width, maxWidth) : item.width,
-            height: useY ? clamp(nextHeight, minSize.height, maxHeight) : item.height
+            width: useX || resizing.lockAspectRatio ? clamp(nextWidth, minSize.width, maxWidth) : item.width,
+            height: useY || resizing.lockAspectRatio ? clamp(nextHeight, minSize.height, maxHeight) : item.height
           };
         })
       );
@@ -2798,6 +3103,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     if (!selectedId) {
       return;
     }
+    pushUndoSnapshot();
     setItems((prev) =>
       prev.map((item) => {
         if (item.id !== selectedId) {
@@ -2839,11 +3145,67 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     setIsDirty(true);
   };
 
+  const updateSelectedTextCharacterWidth = (value: number) => {
+    if (!selectedItem || selectedItem.type !== "text" || !Number.isFinite(value)) {
+      return;
+    }
+    const fontHeight = getTextFontHeight(selectedItem);
+    updateSelected({
+      textWidthRatio: clamp(value / Math.max(1, fontHeight), TEXT_WIDTH_RATIO_MIN, TEXT_WIDTH_RATIO_MAX)
+    });
+  };
+
+  const updateSelectedLinearModuleWidth = (value: number) => {
+    if (!selectedItem || !isLinearBarcodeElementType(selectedItem.type) || !Number.isFinite(value)) {
+      return;
+    }
+    const moduleWidth = clamp(Math.round(value), 1, 10);
+    const effectiveType = selectedItem.type === "gs1128" ? "code128" : selectedItem.type;
+    updateSelected({
+      width: estimateLinearBarcodeWidthDots(effectiveType, getLinearBarcodePayload(selectedItem), moduleWidth)
+    });
+  };
+
+  const updateSelectedQrModuleSize = (value: number) => {
+    if (!selectedItem || selectedItem.type !== "qr" || !Number.isFinite(value)) {
+      return;
+    }
+    const moduleSize = clamp(Math.round(value), 2, 10);
+    const nextSize = moduleSize * 28;
+    updateSelected({ width: nextSize, height: nextSize });
+  };
+
+  const updateSelectedDatamatrixModuleSize = (value: number) => {
+    if (!selectedItem || selectedItem.type !== "datamatrix" || !Number.isFinite(value)) {
+      return;
+    }
+    const moduleSize = clamp(Math.round(value), 3, 12);
+    const nextSize = moduleSize * 24;
+    updateSelected({ width: nextSize, height: nextSize });
+  };
+
+  const updateSelectedPdf417Columns = (value: number) => {
+    if (!selectedItem || selectedItem.type !== "pdf417" || !Number.isFinite(value)) {
+      return;
+    }
+    const columnWidth = clamp(Math.round(value), 2, 30);
+    updateSelected({ width: columnWidth * 42 });
+  };
+
+  const updateSelectedPdf417Rows = (value: number) => {
+    if (!selectedItem || selectedItem.type !== "pdf417" || !Number.isFinite(value)) {
+      return;
+    }
+    const rows = clamp(Math.round(value), 3, 30);
+    updateSelected({ height: rows * 16 });
+  };
+
   const patchSelectedItems = (patch: Partial<BuilderItem>) => {
     if (!selectedIds.length) {
       return;
     }
     const selectedSet = new Set(selectedIds);
+    pushUndoSnapshot();
     setItems((prev) => prev.map((item) => (selectedSet.has(item.id) ? { ...item, ...patch } : item)));
     setIsDirty(true);
   };
@@ -2852,6 +3214,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     if (!hiddenCount) {
       return;
     }
+    pushUndoSnapshot();
     setItems((prev) => prev.map((item) => (item.hidden ? { ...item, hidden: false } : item)));
     setIsDirty(true);
   };
@@ -2861,6 +3224,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
       return;
     }
     const selectedSet = new Set(selectedIds);
+    pushUndoSnapshot();
     setItems((prev) => prev.filter((item) => !selectedSet.has(item.id)));
     setSelectedIds([]);
     setSelectedId(null);
@@ -2868,6 +3232,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
   };
 
   const resetToNewLabel = () => {
+    pushUndoSnapshot();
     setItems([]);
     setUploadedGraphics([]);
     setIncludeSeedGraphics(false);
@@ -2884,6 +3249,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     if (!selectedId) {
       return;
     }
+    pushUndoSnapshot();
     setItems((prev) => moveSelectedLayer(prev, selectedId, mode));
     setIsDirty(true);
   };
@@ -2892,6 +3258,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     if (selectedIds.length < 2) {
       return;
     }
+    pushUndoSnapshot();
     const selectedSet = new Set(selectedIds);
     setItems((prev) => {
       const selected = prev.filter((item) => selectedSet.has(item.id));
@@ -2937,6 +3304,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     if (selectedIds.length < 3) {
       return;
     }
+    pushUndoSnapshot();
     const selectedSet = new Set(selectedIds);
     setItems((prev) => {
       const selected = prev.filter((item) => selectedSet.has(item.id));
@@ -2973,17 +3341,33 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (!selectedIds.length) {
-        return;
-      }
       const target = event.target as HTMLElement | null;
       const tag = target?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target?.isContentEditable) {
         return;
       }
+      const key = event.key.toLowerCase();
+      if ((event.ctrlKey || event.metaKey) && key === "z") {
+        event.preventDefault();
+        if (event.shiftKey) {
+          redoBuilderChange();
+        } else {
+          undoBuilderChange();
+        }
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && key === "y") {
+        event.preventDefault();
+        redoBuilderChange();
+        return;
+      }
+      if (!selectedIds.length) {
+        return;
+      }
       if (event.key === "Delete") {
         event.preventDefault();
         const selectedSet = new Set(selectedIds);
+        pushUndoSnapshot();
         setItems((prev) => prev.filter((item) => !selectedSet.has(item.id)));
         setSelectedIds([]);
         setSelectedId(null);
@@ -3009,6 +3393,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
       }
       event.preventDefault();
       const selectedSet = new Set(selectedIds);
+      pushUndoSnapshot();
       setItems((prev) =>
         prev.map((item) => {
           if (!selectedSet.has(item.id) || item.locked) {
@@ -3026,7 +3411,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectedIds, draggingId, resizing, canvasWidth, canvasHeight]);
+  }, [selectedIds, draggingId, resizing, canvasWidth, canvasHeight, historyAvailability]);
 
   useEffect(() => {
     setBatchRules((prev) =>
@@ -3213,7 +3598,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                 <div className="printer-row">
                   <label htmlFor="builder-drag-mode">Drag Mode:</label>
                   <div className="printer-controls">
-                    <select id="builder-drag-mode" value={dragMode} onChange={(e) => setDragMode(e.target.value as DragMode)}>
+                    <select id="builder-drag-mode" value={dragMode} onChange={(e) => onDragModeChange(e.target.value as DragMode)}>
                       <option value="smooth">Smooth (free)</option>
                       <option value="step">Step</option>
                     </select>
@@ -3250,7 +3635,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                       id="builder-snap-grid"
                       type="checkbox"
                       checked={snapToGridEnabled}
-                      onChange={(e) => setSnapToGridEnabled(e.target.checked)}
+                      onChange={(e) => onSnapToGridChange(e.target.checked)}
                     />
                   </div>
                 </div>
@@ -3261,7 +3646,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                       id="builder-snap-items"
                       type="checkbox"
                       checked={snapToItemsEnabled}
-                      onChange={(e) => setSnapToItemsEnabled(e.target.checked)}
+                      onChange={(e) => onSnapToItemsChange(e.target.checked)}
                     />
                   </div>
                 </div>
@@ -3361,7 +3746,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                   <div className="builder-sub-accordion-body">
                     <select
                       value={selectedBarcodeType}
-                      onChange={(e) => setSelectedBarcodeType(e.target.value as BarcodeElementType)}
+                      onChange={(e) => onSelectedBarcodeTypeChange(e.target.value as BarcodeElementType)}
                       aria-label="Barcode type"
                     >
                       <option value="code128">Code128</option>
@@ -3400,7 +3785,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                     <input type="number" value={Math.round(selectedItem.y)} onChange={(e) => updateSelected({ y: Number(e.target.value) })} />
                   </label>
                   <label>
-                    W
+                    {selectedDimensionLabels.width}
                     <input
                       type="number"
                       value={Math.round(selectedItem.width)}
@@ -3408,13 +3793,92 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                     />
                   </label>
                   <label>
-                    H
+                    {selectedDimensionLabels.height}
                     <input
                       type="number"
                       value={Math.round(selectedItem.height)}
                       onChange={(e) => updateSelected({ height: Number(e.target.value) })}
                     />
                   </label>
+                  {selectedItem.type === "text" && (
+                    <label>
+                      Char W
+                      <input
+                        type="number"
+                        min={1}
+                        max={1024}
+                        value={getTextCharacterWidth(selectedItem)}
+                        onChange={(e) => updateSelectedTextCharacterWidth(Number(e.target.value))}
+                      />
+                    </label>
+                  )}
+                  {isLinearBarcodeElementType(selectedItem.type) && (
+                    <label>
+                      Module W
+                      <input
+                        type="number"
+                        min={1}
+                        max={10}
+                        value={getLinearBarcodeModuleWidth(selectedItem)}
+                        onChange={(e) => updateSelectedLinearModuleWidth(Number(e.target.value))}
+                      />
+                    </label>
+                  )}
+                  {selectedItem.type === "qr" && (
+                    <label>
+                      Module
+                      <input
+                        type="number"
+                        min={2}
+                        max={10}
+                        value={getQrModuleSize(selectedItem)}
+                        onChange={(e) => updateSelectedQrModuleSize(Number(e.target.value))}
+                      />
+                    </label>
+                  )}
+                  {selectedItem.type === "datamatrix" && (
+                    <label>
+                      Module
+                      <input
+                        type="number"
+                        min={3}
+                        max={12}
+                        value={getDatamatrixModuleSize(selectedItem)}
+                        onChange={(e) => updateSelectedDatamatrixModuleSize(Number(e.target.value))}
+                      />
+                    </label>
+                  )}
+                  {selectedItem.type === "pdf417" && (
+                    <>
+                      <label>
+                        Column W
+                        <input
+                          type="number"
+                          min={2}
+                          max={30}
+                          value={getPdf417ColumnWidth(selectedItem)}
+                          onChange={(e) => updateSelectedPdf417Columns(Number(e.target.value))}
+                        />
+                      </label>
+                      <label>
+                        Rows
+                        <input
+                          type="number"
+                          min={3}
+                          max={30}
+                          value={getPdf417Rows(selectedItem)}
+                          onChange={(e) => updateSelectedPdf417Rows(Number(e.target.value))}
+                        />
+                      </label>
+                    </>
+                  )}
+                  {!!selectedEffectiveDetails.length && (
+                    <div className="builder-effective-details">
+                      {selectedEffectiveDetails.map((detail) => (
+                        <span key={detail}>{detail}</span>
+                      ))}
+                    </div>
+                  )}
                   {isFillableType(selectedItem.type) && (
                     <label className="builder-form-checkbox">
                       Filled
@@ -3422,6 +3886,26 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                         type="checkbox"
                         checked={selectedItem.filled}
                         onChange={(e) => updateSelected({ filled: e.target.checked })}
+                      />
+                    </label>
+                  )}
+                  {supportsAspectRatioLock(selectedItem.type) && (
+                    <label className="builder-form-checkbox">
+                      Lock Ratio
+                      <input
+                        type="checkbox"
+                        checked={selectedItem.lockAspectRatio === true}
+                        onChange={(e) => updateSelected({ lockAspectRatio: e.target.checked })}
+                      />
+                    </label>
+                  )}
+                  {isLinearBarcodeElementType(selectedItem.type) && (
+                    <label className="builder-form-checkbox">
+                      Show Text
+                      <input
+                        type="checkbox"
+                        checked={selectedItem.showText !== false}
+                        onChange={(e) => updateSelected({ showText: e.target.checked })}
                       />
                     </label>
                   )}
@@ -3631,7 +4115,9 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                   value={batchLabelCount}
                   onChange={(e) => {
                     const value = Number(e.target.value);
+                    pushUndoSnapshot();
                     setBatchLabelCount(Number.isFinite(value) ? clamp(value, 1, 500) : 1);
+                    setIsDirty(true);
                   }}
                 />
               </div>
@@ -3708,7 +4194,37 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
         </aside>
 
         <section className="builder-canvas-wrap">
-          <h2>Label</h2>
+          <div className="builder-canvas-header">
+            <h2>Label</h2>
+            <div className="builder-history-actions" aria-label="History actions">
+              <button
+                type="button"
+                className="builder-icon-btn"
+                onClick={undoBuilderChange}
+                disabled={!historyAvailability.canUndo}
+                title="Undo (Ctrl+Z)"
+                aria-label="Undo"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M9 7H5v4" />
+                  <path d="M5 11c2.6-3.1 6.2-4.4 9.4-3.4 3.4 1.1 5.3 4.1 4.6 7.1-.6 2.7-3 4.6-6.1 4.6H9" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                className="builder-icon-btn"
+                onClick={redoBuilderChange}
+                disabled={!historyAvailability.canRedo}
+                title="Redo (Ctrl+Shift+Z)"
+                aria-label="Redo"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M15 7h4v4" />
+                  <path d="M19 11c-2.6-3.1-6.2-4.4-9.4-3.4-3.4 1.1-5.3 4.1-4.6 7.1.6 2.7 3 4.6 6.1 4.6H15" />
+                </svg>
+              </button>
+            </div>
+          </div>
           <div
             ref={canvasRef}
             className={`builder-canvas builder-canvas-live-preview${accordionOpen.generator ? " is-generator-mode" : ""}`}
@@ -3729,7 +4245,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
           >
             <div className="builder-render-layer" aria-hidden>
               <ZplCanvas
-                zpl={generatedZpl}
+                zpl={builderPreviewZpl}
                 printerSettings={builderPrinterSettings}
                 showNonPrintableZones={false}
                 respectZplGeometry

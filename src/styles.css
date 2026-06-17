@@ -1571,6 +1571,63 @@ option {
   font-size: 20px;
 }
 
+.builder-canvas-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.builder-canvas-header h2 {
+  margin: 0;
+}
+
+.builder-history-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.builder-icon-btn {
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-main);
+  border-radius: 8px;
+  background: var(--btn-bg);
+  color: var(--btn-text);
+  cursor: pointer;
+  transition: border-color 140ms ease, box-shadow 160ms ease, transform 140ms ease, opacity 140ms ease;
+}
+
+.builder-icon-btn svg {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.builder-icon-btn:hover:not(:disabled) {
+  border-color: var(--accent-border);
+  box-shadow: 0 4px 12px rgba(33, 83, 157, 0.18);
+  transform: translateY(-1px);
+}
+
+.builder-icon-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.builder-icon-btn:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
 .builder-zpl h3 {
   margin: 12px 0 8px;
   font-size: 16px;
@@ -1753,6 +1810,27 @@ option {
 .builder-form > .download-btn {
   grid-column: 1 / -1;
   justify-content: center;
+}
+
+.builder-effective-details {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 7px 8px;
+  border: 1px solid var(--border-main);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.builder-effective-details span {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-muted);
+  background: var(--surface-main);
+  border: 1px solid var(--border-main);
+  border-radius: 6px;
+  padding: 3px 6px;
 }
 
 .builder-canvas-wrap {
