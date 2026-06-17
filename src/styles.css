@@ -1774,6 +1774,23 @@ option {
   user-select: none;
 }
 
+.builder-render-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: 9px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.builder-render-layer .preview-canvas {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  background: #ffffff;
+}
+
 .builder-selection-box {
   position: absolute;
   border: 1px dashed #2f6ee5;
@@ -1815,6 +1832,18 @@ option {
   font-weight: 700;
   letter-spacing: 0.02em;
   padding: 2px 4px;
+  z-index: 1;
+}
+
+.builder-canvas-live-preview .builder-item {
+  background: transparent;
+  border-color: transparent;
+  color: transparent;
+}
+
+.builder-canvas-live-preview .builder-item > span:not(.builder-item-resize-handle),
+.builder-canvas-live-preview .builder-item-barcode-canvas {
+  opacity: 0;
 }
 
 .builder-item.is-locked {
@@ -2073,6 +2102,31 @@ option {
 .builder-item-circle.is-filled,
 .builder-item-ellipse.is-filled {
   background: rgba(31, 61, 99, 0.22);
+}
+
+.builder-canvas-live-preview .builder-item,
+.builder-canvas-live-preview .builder-item.is-filled,
+.builder-canvas-live-preview .builder-item-line,
+.builder-canvas-live-preview .builder-item-line-v,
+.builder-canvas-live-preview .builder-item-line-d,
+.builder-canvas-live-preview .builder-item-box,
+.builder-canvas-live-preview .builder-item-circle,
+.builder-canvas-live-preview .builder-item-ellipse,
+.builder-canvas-live-preview .builder-item-table,
+.builder-canvas-live-preview .builder-item-shade,
+.builder-canvas-live-preview .builder-item-graphic,
+.builder-canvas-live-preview .builder-item-passthrough {
+  background: transparent;
+}
+
+.builder-canvas-live-preview .builder-item:hover {
+  border-color: rgba(47, 110, 229, 0.45);
+  background: rgba(47, 110, 229, 0.06);
+}
+
+.builder-canvas-live-preview .builder-item.is-selected {
+  background: rgba(47, 110, 229, 0.08);
+  border-color: rgba(47, 110, 229, 0.65);
 }
 
 .builder-item-resize-handle {

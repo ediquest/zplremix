@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent, type MouseEvent } from "react";
 import bwipjs from "bwip-js";
+import type { PrinterSettings } from "../../core/types";
+import { ZplCanvas } from "../preview/ZplCanvas";
 
 type LabelBuilderPageProps = {
   seedZpl: string;
@@ -154,6 +156,8 @@ const QR_COMPAT_OFFSET_Y = 12;
 const QR_PREVIEW_DRAW_ADJUST = 0.4;
 const QR_EFFECTIVE_SIZE_MAX = 293;
 const DATAMATRIX_EFFECTIVE_SIZE_MAX = 299;
+const TEXT_WIDTH_RATIO_MIN = 0.2;
+const TEXT_WIDTH_RATIO_MAX = 64;
 const TABLE_META_PREFIX = "ZPLRMX_TABLE";
 const SHADE_META_PREFIX = "ZPLRMX_SHADE";
 const BATCH_META_PREFIX = "ZPLRMX_BATCH";
@@ -368,7 +372,7 @@ function estimateTextBoxWidth(text: string, fontHeight: number, fontWidth?: numb
   const payload = text || " ";
   const widthFromZpl = Number.isFinite(fontWidth) ? Number(fontWidth) : NaN;
   const ratioFromZpl = Number.isFinite(widthFromZpl) && widthFromZpl > 0
-    ? clamp(widthFromZpl / Math.max(1, textHeight), 0.2, 1.5)
+    ? clamp(widthFromZpl / Math.max(1, textHeight), TEXT_WIDTH_RATIO_MIN, TEXT_WIDTH_RATIO_MAX)
     : 1;
   const fallbackPerChar = Number.isFinite(widthFromZpl) && widthFromZpl > 0
     ? Math.max(4, Math.round(widthFromZpl * 0.72))
@@ -392,10 +396,21 @@ function estimateTextBoxWidth(text: string, fontHeight: number, fontWidth?: numb
   return Math.max(22, Math.round(measured * widthScale + padding));
 }
 
-function estimateTextBoxHeightFromWidth(text: string, width: number): number {
-  const chars = Math.max(1, (text ?? "").length);
-  const factor = Math.max(0.87, chars * 0.42 + 0.45);
-  return Math.max(16, Math.round(width / factor));
+function resolveTextWidthRatioForBox(text: string, fontHeight: number, targetWidth: number, font: ZplFont): number {
+  const textHeight = Math.max(10, Math.round(Math.max(12, fontHeight) * 0.8));
+  const safeTarget = Math.max(22, targetWidth);
+  let low = TEXT_WIDTH_RATIO_MIN;
+  let high = TEXT_WIDTH_RATIO_MAX;
+  for (let index = 0; index < 12; index += 1) {
+    const mid = (low + high) / 2;
+    const measured = estimateTextBoxWidth(text, fontHeight, textHeight * mid, font);
+    if (measured < safeTarget) {
+      low = mid;
+    } else {
+      high = mid;
+    }
+  }
+  return clamp((low + high) / 2, TEXT_WIDTH_RATIO_MIN, TEXT_WIDTH_RATIO_MAX);
 }
 
 function resolveBuilderTextFontFamily(font: ZplFont): string {
@@ -991,7 +1006,7 @@ function buildZplFromItems(
     }
     if (item.type === "text") {
       const textHeight = Math.max(14, Math.round(item.height * 0.8));
-      const textWidthRatio = clamp(item.textWidthRatio ?? 0.6, 0.2, 1.5);
+      const textWidthRatio = clamp(item.textWidthRatio ?? 0.6, TEXT_WIDTH_RATIO_MIN, TEXT_WIDTH_RATIO_MAX);
       const textWidth = Math.max(8, Math.round(textHeight * textWidthRatio));
       lines.push(`^FO${x},${y}^A${item.font}${item.orientation},${textHeight},${textWidth}^FD${item.text}^FS`);
       return;
@@ -1560,7 +1575,7 @@ function parseItemsFromZpl(zpl: string): BuilderItem[] {
       const orientation = normalizeOrientation(a?.[2] ?? fieldOrientation);
       const h = Number(a?.[3] || 32);
       const w = Number(a?.[4] || 0);
-      const textWidthRatio = h > 0 && w > 0 ? clamp(w / h, 0.2, 1.5) : 0.6;
+      const textWidthRatio = h > 0 && w > 0 ? clamp(w / h, TEXT_WIDTH_RATIO_MIN, TEXT_WIDTH_RATIO_MAX) : 0.6;
       const width = estimateTextBoxWidth(textPayload, h, w, font);
       const height = Math.max(16, Math.round(h));
       const position = mapFieldPosition(
@@ -1904,7 +1919,7 @@ function getItemMaxPosition(item: BuilderItem, canvasWidth: number, canvasHeight
 
 function getTextCharWidthFromItem(item: BuilderItem, height: number): number {
   const textHeight = Math.max(10, Math.round(height * 0.8));
-  const ratio = clamp(item.textWidthRatio ?? 0.6, 0.2, 1.5);
+  const ratio = clamp(item.textWidthRatio ?? 0.6, TEXT_WIDTH_RATIO_MIN, TEXT_WIDTH_RATIO_MAX);
   return Math.max(4, Math.round(textHeight * ratio));
 }
 
@@ -1988,6 +2003,20 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     const autoFit = 920 / maxSide;
     return clamp(autoFit, 0.28, 1);
   }, [canvasWidth, canvasHeight]);
+  const builderPrinterSettings = useMemo<PrinterSettings>(
+    () => ({
+      model: "Custom",
+      densityDpmm: canvasSettings.densityDpmm,
+      dpi: canvasSettings.densityDpmm === 24 ? 600 : canvasSettings.densityDpmm === 12 ? 300 : 203,
+      quality: "grayscale",
+      labelWidth: canvasSettings.labelWidth,
+      labelHeight: canvasSettings.labelHeight,
+      labelUnit: canvasSettings.labelUnit,
+      showLabelIndex: 1,
+      showLabelCount: 1
+    }),
+    [canvasSettings]
+  );
 
   const selectedItem = useMemo(() => {
     if (selectedIds.length !== 1) {
@@ -2610,16 +2639,34 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
             if (useY) nextHeight = snapToStep(nextHeight, safeDragStep);
           }
           if (snapToGridEnabled) {
-            if (useX) nextWidth = snapToStep(nextWidth, safeGridSize);
-            if (useY) nextHeight = snapToStep(nextHeight, safeGridSize);
+            const gridSnapThreshold = Math.max(3, Math.round(safeGridSize * 0.22));
+            if (useX) {
+              const nextRight = item.x + nextWidth;
+              const snappedRight = dragMode === "step"
+                ? snapToStep(nextRight, safeGridSize)
+                : softSnapToStep(nextRight, safeGridSize, gridSnapThreshold);
+              nextWidth = snappedRight - item.x;
+            }
+            if (useY) {
+              const nextBottom = item.y + nextHeight;
+              const snappedBottom = dragMode === "step"
+                ? snapToStep(nextBottom, safeGridSize)
+                : softSnapToStep(nextBottom, safeGridSize, gridSnapThreshold);
+              nextHeight = snappedBottom - item.y;
+            }
           }
           if (useX) nextWidth = Math.max(minSize.width, nextWidth);
           if (useY) nextHeight = Math.max(minSize.height, nextHeight);
+          let nextTextWidthRatio = item.textWidthRatio;
           if (item.type === "text") {
-            if (useX && !useY) {
-              nextHeight = Math.max(minSize.height, estimateTextBoxHeightFromWidth(item.text, nextWidth));
+            if (useX) {
+              nextTextWidthRatio = resolveTextWidthRatioForBox(item.text, nextHeight, nextWidth, item.font);
             }
-            nextWidth = estimateTextBoxWidth(item.text, nextHeight, getTextCharWidthFromItem(item, nextHeight), item.font);
+            const textCharWidth = Math.max(
+              4,
+              Math.round(Math.max(10, Math.round(nextHeight * 0.8)) * clamp(nextTextWidthRatio ?? 0.6, TEXT_WIDTH_RATIO_MIN, TEXT_WIDTH_RATIO_MAX))
+            );
+            nextWidth = estimateTextBoxWidth(item.text, nextHeight, textCharWidth, item.font);
           }
           const elementSnapThreshold = Math.max(7, Math.round(Math.min(safeGridSize, safeDragStep) * 0.55));
           let guideX: number | null = null;
@@ -2647,6 +2694,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
           ];
           return {
             ...item,
+            textWidthRatio: item.type === "text" ? nextTextWidthRatio : item.textWidthRatio,
             width: useX ? clamp(nextWidth, minSize.width, maxWidth) : item.width,
             height: useY ? clamp(nextHeight, minSize.height, maxHeight) : item.height
           };
@@ -2763,18 +2811,24 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
         const minSize = getMinSizeForItem(next);
         let nextWidth = Math.max(minSize.width, normalizedWidth);
         let nextHeight = Math.max(minSize.height, next.height);
+        let nextTextWidthRatio = next.textWidthRatio;
         if (item.type === "text") {
-          if (patch.width !== undefined && patch.height === undefined) {
-            nextHeight = Math.max(minSize.height, estimateTextBoxHeightFromWidth(next.text, nextWidth));
+          if (patch.width !== undefined) {
+            nextTextWidthRatio = resolveTextWidthRatioForBox(next.text, nextHeight, nextWidth, next.font);
           }
-          nextWidth = estimateTextBoxWidth(next.text, nextHeight, getTextCharWidthFromItem(next, nextHeight), next.font);
+          const textCharWidth = Math.max(
+            4,
+            Math.round(Math.max(10, Math.round(nextHeight * 0.8)) * clamp(nextTextWidthRatio ?? 0.6, TEXT_WIDTH_RATIO_MIN, TEXT_WIDTH_RATIO_MAX))
+          );
+          nextWidth = estimateTextBoxWidth(next.text, nextHeight, textCharWidth, next.font);
         }
         const capped = clampSizeToZplEffect(item.type, nextWidth, nextHeight);
         nextWidth = capped.width;
         nextHeight = capped.height;
-        const maxPos = getItemMaxPosition(item, canvasWidth, canvasHeight);
+        const maxPos = getItemMaxPosition({ ...next, width: nextWidth, height: nextHeight }, canvasWidth, canvasHeight);
         return {
           ...next,
+          textWidthRatio: item.type === "text" ? nextTextWidthRatio : next.textWidthRatio,
           width: nextWidth,
           height: nextHeight,
           x: clamp(next.x, 0, maxPos.x),
@@ -3657,7 +3711,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
           <h2>Label</h2>
           <div
             ref={canvasRef}
-            className={`builder-canvas${accordionOpen.generator ? " is-generator-mode" : ""}`}
+            className={`builder-canvas builder-canvas-live-preview${accordionOpen.generator ? " is-generator-mode" : ""}`}
             style={{
               width: `${canvasWidth * viewScale}px`,
               height: `${canvasHeight * viewScale}px`,
@@ -3673,6 +3727,16 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
             onMouseMove={onCanvasMouseMove}
             onMouseUp={stopDrag}
           >
+            <div className="builder-render-layer" aria-hidden>
+              <ZplCanvas
+                zpl={generatedZpl}
+                printerSettings={builderPrinterSettings}
+                showNonPrintableZones={false}
+                respectZplGeometry
+                labelPaperColor="#ffffff"
+                qrLegacyOffset={false}
+              />
+            </div>
             {selectionBox && (
               <div
                 className="builder-selection-box"
@@ -3742,7 +3806,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                       (() => {
                         const textPx = Math.max(10, Math.round(item.height * 0.8));
                         const widthCalibration = resolveBuilderTextWidthCalibration(item.font);
-                        const textWidthRatio = clamp(item.textWidthRatio ?? 0.6, 0.2, 1.5);
+                        const textWidthRatio = clamp(item.textWidthRatio ?? 0.6, TEXT_WIDTH_RATIO_MIN, TEXT_WIDTH_RATIO_MAX);
                         const rotation =
                           item.orientation === "R"
                             ? "rotate(90deg)"
