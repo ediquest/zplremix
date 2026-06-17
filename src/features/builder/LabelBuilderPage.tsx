@@ -153,6 +153,11 @@ type InitialBuilderState = {
 
 type BuilderHistorySnapshot = InitialBuilderState;
 
+type BuilderClipboardSnapshot = {
+  items: BuilderItem[];
+  pasteCount: number;
+};
+
 const LS_PREVIEW_SETTINGS_KEY = "zplremix.preview.settings";
 const LS_BUILDER_BATCH_PROJECTS_KEY = "zplremix.builder.batch.projects";
 const LS_BUILDER_LAST_BATCH_ID_KEY = "zplremix.builder.batch.last_id";
@@ -798,6 +803,32 @@ function getLinearBarcodeModuleWidth(item: BuilderItem): number {
   const effectiveType = item.type === "gs1128" ? "code128" : item.type;
   const baseWidth = estimateLinearBarcodeWidthDots(effectiveType, payload, 1);
   return clamp(Math.round(Math.max(12, item.width) / Math.max(1, baseWidth)), 1, 10);
+}
+
+function getLinearBarcodeSourceModuleWidth(item: BuilderItem): number {
+  if (item.sourceBody) {
+    const byArgs = parseZplCommandArgs(item.sourceBody, "BY");
+    const parsed = Number(byArgs[0] ?? "");
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return clamp(Math.round(parsed), 1, 10);
+    }
+  }
+  return getLinearBarcodeModuleWidth(item);
+}
+
+function normalizePastedItemFrame(item: BuilderItem): BuilderItem {
+  if (!isLinearBarcodeElementType(item.type)) {
+    return item;
+  }
+  if (item.sourceBody) {
+    return item;
+  }
+  const effectiveType = item.type === "gs1128" ? "code128" : item.type;
+  const moduleWidth = getLinearBarcodeSourceModuleWidth(item);
+  return {
+    ...item,
+    width: estimateLinearBarcodeWidthDots(effectiveType, getLinearBarcodePayload(item), moduleWidth)
+  };
 }
 
 function getTextFontHeight(item: BuilderItem): number {
@@ -2082,6 +2113,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
   const [dragStep, setDragStep] = useState(() => initialState.dragStep);
   const [snapToGridEnabled, setSnapToGridEnabled] = useState(() => initialState.snapToGridEnabled);
   const [snapToItemsEnabled, setSnapToItemsEnabled] = useState(() => initialState.snapToItemsEnabled);
+  const [canvasZoom, setCanvasZoom] = useState(1);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [draggingId, setDraggingId] = useState<string | null>(null);
@@ -2090,6 +2122,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
   const [dragSnapshot, setDragSnapshot] = useState<DragSnapshot[]>([]);
   const [selectionBox, setSelectionBox] = useState<SelectionBoxState | null>(null);
   const [guideLines, setGuideLines] = useState<BuilderGuideLine[]>([]);
+  const [canvasCursor, setCanvasCursor] = useState<{ x: number; y: number } | null>(null);
   const [uploadedGraphics, setUploadedGraphics] = useState<UploadedGraphic[]>(() => initialState.uploadedGraphics);
   const [includeSeedGraphics, setIncludeSeedGraphics] = useState<boolean>(() => initialState.includeSeedGraphics);
   const [batchRules, setBatchRules] = useState<BatchGeneratorRule[]>(() => initialState.batchRules);
@@ -2098,7 +2131,9 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
   const [hoveredBatchItemId, setHoveredBatchItemId] = useState<string | null>(null);
   const undoStackRef = useRef<BuilderHistorySnapshot[]>([]);
   const redoStackRef = useRef<BuilderHistorySnapshot[]>([]);
+  const clipboardRef = useRef<BuilderClipboardSnapshot | null>(null);
   const [historyAvailability, setHistoryAvailability] = useState({ canUndo: false, canRedo: false });
+  const [clipboardAvailable, setClipboardAvailable] = useState(false);
   const [accordionOpen, setAccordionOpen] = useState<Record<BuilderAccordionKey, boolean>>({
     canvas: false,
     grid: false,
@@ -2203,6 +2238,62 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     refreshHistoryAvailability();
   };
 
+  const copySelectedItems = () => {
+    const selectedSet = new Set(selectedIds);
+    const copied = items
+      .filter((item) => selectedSet.has(item.id))
+      .sort((a, b) => a.zIndex - b.zIndex)
+      .map((item) => ({ ...item }));
+    if (!copied.length) {
+      return;
+    }
+    clipboardRef.current = {
+      items: copied,
+      pasteCount: 0
+    };
+    setClipboardAvailable(true);
+  };
+
+  const pasteClipboardItems = () => {
+    const clipboard = clipboardRef.current;
+    if (!clipboard?.items.length) {
+      return;
+    }
+    pushUndoSnapshot();
+    const pasteCount = clipboard.pasteCount + 1;
+    const offset = 24 * pasteCount;
+    const maxZ = items.length ? Math.max(...items.map((item) => item.zIndex)) : 0;
+    const clones = clipboard.items.map((source, index) => {
+      const draft: BuilderItem = normalizePastedItemFrame({
+        ...source,
+        id: crypto.randomUUID(),
+        zIndex: maxZ + index + 1
+      });
+      const maxPos = getItemMaxPosition(draft, canvasWidth, canvasHeight);
+      return {
+        ...draft,
+        x: clamp(source.x + offset, 0, maxPos.x),
+        y: clamp(source.y + offset, 0, maxPos.y)
+      };
+    });
+    clipboardRef.current = {
+      ...clipboard,
+      pasteCount
+    };
+    setItems((prev) => [...prev, ...clones]);
+    setSelectedIds(clones.map((item) => item.id));
+    setSelectedId(clones.length === 1 ? clones[0].id : null);
+    setIsDirty(true);
+  };
+
+  const duplicateSelectedItems = () => {
+    if (!selectedIds.length) {
+      return;
+    }
+    copySelectedItems();
+    pasteClipboardItems();
+  };
+
   const canvasWidth = useMemo(() => {
     const mm = unitToMm(canvasSettings.labelWidth, canvasSettings.labelUnit);
     return Math.max(40, Math.round(mm * canvasSettings.densityDpmm));
@@ -2211,11 +2302,29 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     const mm = unitToMm(canvasSettings.labelHeight, canvasSettings.labelUnit);
     return Math.max(40, Math.round(mm * canvasSettings.densityDpmm));
   }, [canvasSettings.labelHeight, canvasSettings.labelUnit, canvasSettings.densityDpmm]);
-  const viewScale = useMemo(() => {
+  const baseViewScale = useMemo(() => {
     const maxSide = Math.max(canvasWidth, canvasHeight);
     const autoFit = 920 / maxSide;
     return clamp(autoFit, 0.28, 1);
   }, [canvasWidth, canvasHeight]);
+  const viewScale = useMemo(() => baseViewScale * canvasZoom, [baseViewScale, canvasZoom]);
+  const rulerStep = useMemo(() => {
+    if (viewScale >= 1) {
+      return 50;
+    }
+    if (viewScale >= 0.5) {
+      return 100;
+    }
+    return 200;
+  }, [viewScale]);
+  const horizontalRulerTicks = useMemo(
+    () => Array.from({ length: Math.floor(canvasWidth / rulerStep) + 1 }, (_, index) => index * rulerStep),
+    [canvasWidth, rulerStep]
+  );
+  const verticalRulerTicks = useMemo(
+    () => Array.from({ length: Math.floor(canvasHeight / rulerStep) + 1 }, (_, index) => index * rulerStep),
+    [canvasHeight, rulerStep]
+  );
   const builderPrinterSettings = useMemo<PrinterSettings>(
     () => ({
       model: "Custom",
@@ -2245,7 +2354,28 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     () => selectedItem ? getEffectiveDetails(selectedItem) : [],
     [selectedItem]
   );
+  const selectedHasZplParameters = !!selectedItem && (
+    selectedItem.type === "text"
+    || isBarcodeElementType(selectedItem.type)
+    || selectedEffectiveDetails.length > 0
+  );
   const hiddenCount = useMemo(() => items.filter((item) => item.hidden).length, [items]);
+  const activeMeasure = useMemo(() => {
+    const selected = items.filter((item) => selectedIds.includes(item.id));
+    if (!selected.length) {
+      return null;
+    }
+    const minX = Math.min(...selected.map((item) => item.x));
+    const minY = Math.min(...selected.map((item) => item.y));
+    const maxX = Math.max(...selected.map((item) => item.x + item.width));
+    const maxY = Math.max(...selected.map((item) => item.y + item.height));
+    return {
+      x: Math.round(minX),
+      y: Math.round(minY),
+      width: Math.round(maxX - minX),
+      height: Math.round(maxY - minY)
+    };
+  }, [items, selectedIds]);
   const sourceGraphicDownloads = useMemo(
     () => (includeSeedGraphics ? extractGraphicDownloadCommands(seedZpl) : []),
     [includeSeedGraphics, seedZpl]
@@ -2418,6 +2548,13 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     pushUndoSnapshot();
     setSelectedBarcodeType(value);
     setIsDirty(true);
+  };
+  const zoomCanvas = (direction: "in" | "out" | "fit") => {
+    if (direction === "fit") {
+      setCanvasZoom(1);
+      return;
+    }
+    setCanvasZoom((prev) => clamp(Math.round((prev + (direction === "in" ? 0.15 : -0.15)) * 100) / 100, 0.5, 2.5));
   };
   const updateCanvasSettings = (updater: (prev: BuilderCanvasSettings) => BuilderCanvasSettings) => {
     pushUndoSnapshot();
@@ -2626,9 +2763,12 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     setDraggingId(null);
     setDragSnapshot([]);
     setSelectionBox(null);
+    setCanvasZoom(1);
     setIsDirty(false);
     undoStackRef.current = [];
     redoStackRef.current = [];
+    clipboardRef.current = null;
+    setClipboardAvailable(false);
     refreshHistoryAvailability();
   }, [seedZpl]);
 
@@ -3077,6 +3217,13 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
   };
 
   const onCanvasMouseMove = (e: MouseEvent) => {
+    if (canvasRef.current) {
+      const rect = canvasRef.current.getBoundingClientRect();
+      setCanvasCursor({
+        x: Math.round(clamp((e.clientX - rect.left) / viewScale, 0, canvasWidth)),
+        y: Math.round(clamp((e.clientY - rect.top) / viewScale, 0, canvasHeight))
+      });
+    }
     onCanvasPointerMove(e.clientX, e.clientY);
   };
 
@@ -3361,6 +3508,21 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
         redoBuilderChange();
         return;
       }
+      if ((event.ctrlKey || event.metaKey) && key === "c") {
+        event.preventDefault();
+        copySelectedItems();
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && key === "v") {
+        event.preventDefault();
+        pasteClipboardItems();
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && key === "d") {
+        event.preventDefault();
+        duplicateSelectedItems();
+        return;
+      }
       if (!selectedIds.length) {
         return;
       }
@@ -3411,7 +3573,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectedIds, draggingId, resizing, canvasWidth, canvasHeight, historyAvailability]);
+  }, [selectedIds, draggingId, resizing, canvasWidth, canvasHeight, historyAvailability, clipboardAvailable, items]);
 
   useEffect(() => {
     setBatchRules((prev) =>
@@ -3776,6 +3938,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
             <div className="builder-accordion-body">
               {selectedItem ? (
                 <div className="builder-form">
+                  <div className="builder-fieldset-title">Position</div>
                   <label>
                     X
                     <input type="number" value={Math.round(selectedItem.x)} onChange={(e) => updateSelected({ x: Number(e.target.value) })} />
@@ -3800,6 +3963,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                       onChange={(e) => updateSelected({ height: Number(e.target.value) })}
                     />
                   </label>
+                  {selectedHasZplParameters && <div className="builder-fieldset-title">ZPL Parameters</div>}
                   {selectedItem.type === "text" && (
                     <label>
                       Char W
@@ -3879,36 +4043,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                       ))}
                     </div>
                   )}
-                  {isFillableType(selectedItem.type) && (
-                    <label className="builder-form-checkbox">
-                      Filled
-                      <input
-                        type="checkbox"
-                        checked={selectedItem.filled}
-                        onChange={(e) => updateSelected({ filled: e.target.checked })}
-                      />
-                    </label>
-                  )}
-                  {supportsAspectRatioLock(selectedItem.type) && (
-                    <label className="builder-form-checkbox">
-                      Lock Ratio
-                      <input
-                        type="checkbox"
-                        checked={selectedItem.lockAspectRatio === true}
-                        onChange={(e) => updateSelected({ lockAspectRatio: e.target.checked })}
-                      />
-                    </label>
-                  )}
-                  {isLinearBarcodeElementType(selectedItem.type) && (
-                    <label className="builder-form-checkbox">
-                      Show Text
-                      <input
-                        type="checkbox"
-                        checked={selectedItem.showText !== false}
-                        onChange={(e) => updateSelected({ showText: e.target.checked })}
-                      />
-                    </label>
-                  )}
+                  {isContentEditableType(selectedItem.type) && <div className="builder-fieldset-title">Content</div>}
                   {isContentEditableType(selectedItem.type) && (
                     <label>
                       {selectedItem.type === "table"
@@ -3962,6 +4097,39 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                       </p>
                     </div>
                   )}
+                  {(isFillableType(selectedItem.type) || supportsAspectRatioLock(selectedItem.type) || isLinearBarcodeElementType(selectedItem.type) || selectedItem.type === "text" || isBarcodeElementType(selectedItem.type) || selectedItem.type === "line-d") && (
+                    <div className="builder-fieldset-title">Appearance</div>
+                  )}
+                  {isFillableType(selectedItem.type) && (
+                    <label className="builder-form-checkbox">
+                      Filled
+                      <input
+                        type="checkbox"
+                        checked={selectedItem.filled}
+                        onChange={(e) => updateSelected({ filled: e.target.checked })}
+                      />
+                    </label>
+                  )}
+                  {supportsAspectRatioLock(selectedItem.type) && (
+                    <label className="builder-form-checkbox">
+                      Lock Ratio
+                      <input
+                        type="checkbox"
+                        checked={selectedItem.lockAspectRatio === true}
+                        onChange={(e) => updateSelected({ lockAspectRatio: e.target.checked })}
+                      />
+                    </label>
+                  )}
+                  {isLinearBarcodeElementType(selectedItem.type) && (
+                    <label className="builder-form-checkbox">
+                      Show Text
+                      <input
+                        type="checkbox"
+                        checked={selectedItem.showText !== false}
+                        onChange={(e) => updateSelected({ showText: e.target.checked })}
+                      />
+                    </label>
+                  )}
                   {selectedItem.type === "text" && (
                     <label>
                       Font
@@ -4006,6 +4174,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                       </select>
                     </label>
                   )}
+                  <div className="builder-fieldset-title">Layer</div>
                   <div className="builder-flag-tools">
                     <label className="builder-form-checkbox">
                       Locked
@@ -4196,53 +4365,226 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
         <section className="builder-canvas-wrap">
           <div className="builder-canvas-header">
             <h2>Label</h2>
-            <div className="builder-history-actions" aria-label="History actions">
-              <button
-                type="button"
-                className="builder-icon-btn"
-                onClick={undoBuilderChange}
-                disabled={!historyAvailability.canUndo}
-                title="Undo (Ctrl+Z)"
-                aria-label="Undo"
-              >
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M9 7H5v4" />
-                  <path d="M5 11c2.6-3.1 6.2-4.4 9.4-3.4 3.4 1.1 5.3 4.1 4.6 7.1-.6 2.7-3 4.6-6.1 4.6H9" />
-                </svg>
-              </button>
-              <button
-                type="button"
-                className="builder-icon-btn"
-                onClick={redoBuilderChange}
-                disabled={!historyAvailability.canRedo}
-                title="Redo (Ctrl+Shift+Z)"
-                aria-label="Redo"
-              >
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M15 7h4v4" />
-                  <path d="M19 11c-2.6-3.1-6.2-4.4-9.4-3.4-3.4 1.1-5.3 4.1-4.6 7.1.6 2.7 3 4.6 6.1 4.6H15" />
-                </svg>
-              </button>
+            <div className="builder-canvas-toolbar" aria-label="Canvas tools">
+              <div className="builder-toolbar-group" aria-label="History actions">
+                <button
+                  type="button"
+                  className="builder-icon-btn"
+                  onClick={undoBuilderChange}
+                  disabled={!historyAvailability.canUndo}
+                  title="Undo (Ctrl+Z)"
+                  aria-label="Undo"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M9 7H5v4" />
+                    <path d="M5 11c2.6-3.1 6.2-4.4 9.4-3.4 3.4 1.1 5.3 4.1 4.6 7.1-.6 2.7-3 4.6-6.1 4.6H9" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  className="builder-icon-btn"
+                  onClick={redoBuilderChange}
+                  disabled={!historyAvailability.canRedo}
+                  title="Redo (Ctrl+Shift+Z)"
+                  aria-label="Redo"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M15 7h4v4" />
+                    <path d="M19 11c-2.6-3.1-6.2-4.4-9.4-3.4-3.4 1.1-5.3 4.1-4.6 7.1.6 2.7 3 4.6 6.1 4.6H15" />
+                  </svg>
+                </button>
+              </div>
+              <div className="builder-toolbar-group" aria-label="Edit actions">
+                <button
+                  type="button"
+                  className="builder-icon-btn"
+                  onClick={copySelectedItems}
+                  disabled={!selectedIds.length}
+                  title="Copy (Ctrl+C)"
+                  aria-label="Copy"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M9 9h10v10H9z" />
+                    <path d="M5 15H4V5h10v1" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  className="builder-icon-btn"
+                  onClick={pasteClipboardItems}
+                  disabled={!clipboardAvailable}
+                  title="Paste (Ctrl+V)"
+                  aria-label="Paste"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M9 5h6" />
+                    <path d="M10 3h4l1 2-1 2h-4L9 5z" />
+                    <path d="M7 5H5v16h14V5h-2" />
+                    <path d="M8 13h8" />
+                    <path d="M8 17h6" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  className="builder-icon-btn"
+                  onClick={duplicateSelectedItems}
+                  disabled={!selectedIds.length}
+                  title="Duplicate (Ctrl+D)"
+                  aria-label="Duplicate"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M8 8h10v10H8z" />
+                    <path d="M6 16H4V4h12v2" />
+                    <path d="M13 11v4" />
+                    <path d="M11 13h4" />
+                  </svg>
+                </button>
+              </div>
+              <div className="builder-toolbar-group" aria-label="Zoom controls">
+                <button type="button" className="builder-icon-btn" onClick={() => zoomCanvas("out")} title="Zoom Out" aria-label="Zoom Out">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <circle cx="10.5" cy="10.5" r="5.5" />
+                    <path d="M15 15l5 5" />
+                    <path d="M8 10.5h5" />
+                  </svg>
+                </button>
+                <button type="button" className="builder-icon-btn builder-icon-btn-fit" onClick={() => zoomCanvas("fit")} title="Fit To Screen" aria-label="Fit To Screen">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M8 4H4v4" />
+                    <path d="M16 4h4v4" />
+                    <path d="M20 16v4h-4" />
+                    <path d="M8 20H4v-4" />
+                  </svg>
+                  <span>{Math.round(canvasZoom * 100)}%</span>
+                </button>
+                <button type="button" className="builder-icon-btn" onClick={() => zoomCanvas("in")} title="Zoom In" aria-label="Zoom In">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <circle cx="10.5" cy="10.5" r="5.5" />
+                    <path d="M15 15l5 5" />
+                    <path d="M8 10.5h5" />
+                    <path d="M10.5 8v5" />
+                  </svg>
+                </button>
+              </div>
+              <div className="builder-toolbar-group" aria-label="Snap controls">
+                <button
+                  type="button"
+                  className={`builder-icon-btn${snapToGridEnabled ? " is-active" : ""}`}
+                  onClick={() => onSnapToGridChange(!snapToGridEnabled)}
+                  title="Snap To Grid"
+                  aria-label="Snap To Grid"
+                  aria-pressed={snapToGridEnabled}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M4 4h16v16H4z" />
+                    <path d="M12 4v16" />
+                    <path d="M4 12h16" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  className={`builder-icon-btn${snapToItemsEnabled ? " is-active" : ""}`}
+                  onClick={() => onSnapToItemsChange(!snapToItemsEnabled)}
+                  title="Snap To Elements"
+                  aria-label="Snap To Elements"
+                  aria-pressed={snapToItemsEnabled}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M7 7h5v5H7z" />
+                    <path d="M12 12h5v5h-5z" />
+                    <path d="M5 19h14" />
+                    <path d="M5 5h14" />
+                  </svg>
+                </button>
+              </div>
             </div>
           </div>
           <div
-            ref={canvasRef}
-            className={`builder-canvas builder-canvas-live-preview${accordionOpen.generator ? " is-generator-mode" : ""}`}
+            className="builder-ruler-frame"
             style={{
-              width: `${canvasWidth * viewScale}px`,
-              height: `${canvasHeight * viewScale}px`,
-              backgroundImage:
-                `linear-gradient(0deg, rgba(210, 223, 242, ${gridAlpha}) 1px, transparent 1px), ` +
-                `linear-gradient(90deg, rgba(210, 223, 242, ${gridAlpha}) 1px, transparent 1px), ` +
-                "linear-gradient(var(--label-paper), var(--label-paper))",
-              backgroundSize: `${safeGridSize}px ${safeGridSize}px, ${safeGridSize}px ${safeGridSize}px, auto`
+              gridTemplateColumns: `34px ${canvasWidth * viewScale}px`,
+              gridTemplateRows: `24px ${canvasHeight * viewScale}px`
             }}
-            onDragOver={(e) => e.preventDefault()}
-            onDrop={onCanvasDrop}
-            onMouseDown={onCanvasMouseDown}
-            onMouseMove={onCanvasMouseMove}
-            onMouseUp={stopDrag}
           >
+            <div className="builder-ruler-corner">
+              {canvasCursor ? `${canvasCursor.x},${canvasCursor.y}` : "dots"}
+            </div>
+            <div className="builder-ruler builder-ruler-top" style={{ width: `${canvasWidth * viewScale}px` }}>
+              {activeMeasure && (
+                <>
+                  <span
+                    className="builder-ruler-selection builder-ruler-selection-x"
+                    style={{
+                      left: `${activeMeasure.x * viewScale}px`,
+                      width: `${activeMeasure.width * viewScale}px`
+                    }}
+                  />
+                  <span className="builder-ruler-marker builder-ruler-marker-x" style={{ left: `${activeMeasure.x * viewScale}px` }} />
+                  <span className="builder-ruler-marker builder-ruler-marker-x" style={{ left: `${(activeMeasure.x + activeMeasure.width) * viewScale}px` }} />
+                  <span className="builder-ruler-marker-label builder-ruler-marker-label-x" style={{ left: `${activeMeasure.x * viewScale}px` }}>
+                    {activeMeasure.x}
+                  </span>
+                  <span className="builder-ruler-marker-label builder-ruler-marker-label-x builder-ruler-marker-label-end" style={{ left: `${(activeMeasure.x + activeMeasure.width) * viewScale}px` }}>
+                    {activeMeasure.x + activeMeasure.width}
+                  </span>
+                </>
+              )}
+              {horizontalRulerTicks.map((tick) => (
+                <span key={`x-${tick}`} className="builder-ruler-tick" style={{ left: `${tick * viewScale}px` }}>
+                  {tick}
+                </span>
+              ))}
+            </div>
+            <div className="builder-ruler builder-ruler-left" style={{ height: `${canvasHeight * viewScale}px` }}>
+              {activeMeasure && (
+                <>
+                  <span
+                    className="builder-ruler-selection builder-ruler-selection-y"
+                    style={{
+                      top: `${activeMeasure.y * viewScale}px`,
+                      height: `${activeMeasure.height * viewScale}px`
+                    }}
+                  />
+                  <span className="builder-ruler-marker builder-ruler-marker-y" style={{ top: `${activeMeasure.y * viewScale}px` }} />
+                  <span className="builder-ruler-marker builder-ruler-marker-y" style={{ top: `${(activeMeasure.y + activeMeasure.height) * viewScale}px` }} />
+                  <span className="builder-ruler-marker-label builder-ruler-marker-label-y" style={{ top: `${activeMeasure.y * viewScale}px` }}>
+                    {activeMeasure.y}
+                  </span>
+                  <span className="builder-ruler-marker-label builder-ruler-marker-label-y builder-ruler-marker-label-end" style={{ top: `${(activeMeasure.y + activeMeasure.height) * viewScale}px` }}>
+                    {activeMeasure.y + activeMeasure.height}
+                  </span>
+                </>
+              )}
+              {verticalRulerTicks.map((tick) => (
+                <span key={`y-${tick}`} className="builder-ruler-tick" style={{ top: `${tick * viewScale}px` }}>
+                  {tick}
+                </span>
+              ))}
+            </div>
+            <div
+              ref={canvasRef}
+              className={`builder-canvas builder-canvas-live-preview${accordionOpen.generator ? " is-generator-mode" : ""}`}
+              style={{
+                width: `${canvasWidth * viewScale}px`,
+                height: `${canvasHeight * viewScale}px`,
+                backgroundImage:
+                  `linear-gradient(0deg, rgba(210, 223, 242, ${gridAlpha}) 1px, transparent 1px), ` +
+                  `linear-gradient(90deg, rgba(210, 223, 242, ${gridAlpha}) 1px, transparent 1px), ` +
+                  "linear-gradient(var(--label-paper), var(--label-paper))",
+                backgroundSize: `${safeGridSize}px ${safeGridSize}px, ${safeGridSize}px ${safeGridSize}px, auto`
+              }}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={onCanvasDrop}
+              onMouseDown={onCanvasMouseDown}
+              onMouseMove={onCanvasMouseMove}
+              onMouseLeave={() => setCanvasCursor(null)}
+              onMouseUp={stopDrag}
+            >
+            {activeMeasure && (
+              <div className="builder-measure-hud">
+                X {activeMeasure.x} Y {activeMeasure.y} W {activeMeasure.width} H {activeMeasure.height}
+              </div>
+            )}
             <div className="builder-render-layer" aria-hidden>
               <ZplCanvas
                 zpl={builderPreviewZpl}
@@ -4366,6 +4708,7 @@ export function LabelBuilderPage({ seedZpl, onBack }: LabelBuilderPageProps) {
                 {!item.locked && <span className="builder-item-resize-handle builder-item-resize-handle-corner" onMouseDown={(e) => onResizeHandleMouseDown(e, item, "corner")} />}
               </div>
             ))}
+            </div>
           </div>
         </section>
 
